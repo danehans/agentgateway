@@ -62,7 +62,7 @@ The missing piece is a native scheduler that can use request and provider+model 
 - Support USD pricing only for the MVP while reserving an explicit `currency` field for future expansion.
 - Fail closed when cost-optimized routing has no priced eligible candidates.
 - Surface selected provider+model and routing decision metadata in logs, metrics, and traces.
-- Surface invalid profile or pricing configuration through status conditions on the appropriate CRD.
+- Surface invalid profile or catalog-source configuration through admission validation or Gateway status where practical.
 
 ## Non-Goals
 
@@ -228,12 +228,18 @@ Validation:
 
 - `aiLoadBalancing` is optional. If unset, AI backends use the current P2C provider selection behavior.
 - Each profile must define a trigger. The MVP supports `trigger.model`.
-- `trigger.model` values must be unique within the Gateway's effective `AgentgatewayParameters`.
-- `CostOptimized` requires a configured model catalog source.
+- `trigger.model` values must be unique within an `AgentgatewayParameters` object and within the Gateway's effective
+  parameters.
+- `CostOptimized` requires at least one configured `modelCatalog` source in the Gateway's effective parameters.
 - `CostOptimized` supports only `missingPrice: FailClosed` in the MVP.
-- `custom.cost.catalog.provider`, when set, must be a valid non-empty model catalog provider key.
+- `modelCatalog.sources[]` must identify a ConfigMap source.
+- `custom.cost.catalog.provider` and `custom.cost.catalog.model`, when set, must be valid non-empty catalog keys.
 - Unsupported request formats are rejected at runtime with a clear error. Static validation should catch unsupported
   formats only when the controller has enough information to do so.
+
+Admission validation should cover rules that are local to a single object. Gateway reconciliation should validate the
+merged effective Gateway parameters and set `Accepted=False`, `Reason=InvalidParameters` with a reason-prefixed message
+such as `DuplicateAILoadBalancingTrigger` or `MissingModelCatalog` when the merged configuration is invalid.
 
 Profile trigger resolution is gateway-scoped. If the same `AgentgatewayBackend` is referenced by routes attached to
 different Gateways, each Gateway evaluates triggers from its own effective `AgentgatewayParameters`.
@@ -488,9 +494,12 @@ Controller changes:
 
 - Add `aiLoadBalancing` to `AgentgatewayParameters`.
 - Add `spec.ai.groups[].providers[].custom.cost.catalog` for custom provider model catalog lookup.
-- Validate `aiLoadBalancing` profile triggers in the Gateway's effective `AgentgatewayParameters`.
-- Validate `CostOptimized` profile requirements.
-- Set status conditions when profile or pricing configuration is invalid or incomplete.
+- Use CRD validation for local profile uniqueness, model-catalog source shape, MVP `missingPrice`, and non-empty custom
+  catalog override fields.
+- Validate `aiLoadBalancing` profile triggers and CostOptimized catalog requirements in the Gateway's effective
+  parameters during reconciliation.
+- Surface effective-parameter errors through the existing Gateway `Accepted=False`, `Reason=InvalidParameters` status
+  path.
 - Translate profile trigger and strategy configuration into the generated proxy config.
 
 Dataplane/proto changes:
@@ -500,17 +509,27 @@ Dataplane/proto changes:
 - Carry custom provider cost catalog identity to the dataplane separately from provider wire behavior.
 - Preserve the existing wire format when no trigger matches.
 
-## Status Conditions
+## Validation And Status
 
 The controller should surface configuration problems instead of silently falling back.
 
 Examples:
 
-- `Accepted=False`, `Reason=InvalidAILoadBalancingProfile` when profile triggers are invalid or duplicated.
-- `Accepted=False`, `Reason=InvalidAILoadBalancingProfile` when `CostOptimized` is configured without a model catalog.
-- `ResolvedRefs=False`, `Reason=InvalidModelCatalog` when the referenced catalog ConfigMap is missing or malformed.
-- `Accepted=False`, `Reason=UnpricedAICandidates` when a cost-optimized trigger has no priced eligible candidates for a
-  referenced AI backend.
+- Admission rejects duplicate `aiLoadBalancing.profiles[*].trigger.model` values within one `AgentgatewayParameters`.
+- Gateway reconciliation rejects `CostOptimized` profiles without at least one effective `modelCatalog` source. This is
+  status-time validation because GatewayClass and Gateway `AgentgatewayParameters` can combine into the effective
+  configuration.
+- Gateway reconciliation rejects merged effective parameters with duplicate triggers or missing model catalog sources by
+  setting Gateway `Accepted=False`, `Reason=InvalidParameters`; the message should include a stable prefix such as
+  `DuplicateAILoadBalancingTrigger` or `MissingModelCatalog`.
+- Admission rejects empty `custom.cost.catalog.provider` and `custom.cost.catalog.model` values through their string
+  validation.
+
+Full provider/model pricing coverage depends on the referenced catalog ConfigMap contents and the selected
+`AgentgatewayBackend` candidates. Static admission cannot always know that every runtime candidate is priced. The MVP
+therefore keeps runtime fail-closed behavior for unpriced candidates. A future controller enhancement can add status such
+as `Accepted=False`, `Reason=UnpricedAICandidates` on affected AI backends or Gateways after resolving catalog data and
+backend candidates.
 
 If only some candidates are unpriced, the backend can still be accepted, but status should identify the skipped
 provider+model pairs when practical. At runtime, those candidates are ineligible for cost-optimized selection.
@@ -569,7 +588,9 @@ Operators opt in by:
 
 - API validation accepts omitted `spec.aiLoadBalancing`.
 - API validation rejects duplicate `trigger.model` values.
-- API validation rejects invalid `CostOptimized` profile config.
+- Effective Gateway parameter validation rejects `CostOptimized` without `modelCatalog.sources`.
+- API validation rejects empty custom catalog provider/model overrides.
+- Effective Gateway parameter validation rejects duplicate triggers and missing model catalog sources after merging.
 - Controller translation preserves existing AI backend output when no trigger matches.
 - Controller translation includes trigger and strategy config when configured.
 - Runtime uses existing P2C when the effective model does not match a trigger.
