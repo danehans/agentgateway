@@ -311,6 +311,125 @@ func TestAgentgatewayParametersApplier_ApplyToHelmValues_AILoadBalancing(t *test
 	assert.Equal(t, agentgateway.MissingPriceBehaviorFailClosed, profile.Cost.MissingPrice)
 }
 
+func TestValidateAILoadBalancingEffectiveConfig(t *testing.T) {
+	configMapSource := agentgateway.ModelCatalogSource{
+		ConfigMap: &agentgateway.ModelCatalogConfigMapRef{Name: "model-costs"},
+	}
+
+	tests := []struct {
+		name    string
+		gateway *AgentgatewayHelmGateway
+		wantErr string
+	}{
+		{
+			name: "valid cost optimized",
+			gateway: &AgentgatewayHelmGateway{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					ModelCatalog: &agentgateway.ModelCatalogSpec{
+						Sources: []agentgateway.ModelCatalogSource{configMapSource},
+					},
+					AILoadBalancing: &agentgateway.AILoadBalancingSpec{
+						Profiles: []agentgateway.AILoadBalancingProfile{
+							{
+								Name: "cost",
+								Trigger: agentgateway.AILoadBalancingTrigger{
+									Model: agentgateway.ShortString("auto"),
+								},
+								Strategy: agentgateway.AILoadBalancingStrategyCostOptimized,
+								Cost: &agentgateway.CostOptimizedLoadBalancingSpec{
+									MissingPrice: agentgateway.MissingPriceBehaviorFailClosed,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "duplicate triggers",
+			gateway: &AgentgatewayHelmGateway{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					ModelCatalog: &agentgateway.ModelCatalogSpec{
+						Sources: []agentgateway.ModelCatalogSource{configMapSource},
+					},
+					AILoadBalancing: &agentgateway.AILoadBalancingSpec{
+						Profiles: []agentgateway.AILoadBalancingProfile{
+							{
+								Name: "cost-a",
+								Trigger: agentgateway.AILoadBalancingTrigger{
+									Model: agentgateway.ShortString("auto"),
+								},
+								Strategy: agentgateway.AILoadBalancingStrategyCostOptimized,
+							},
+							{
+								Name: "cost-b",
+								Trigger: agentgateway.AILoadBalancingTrigger{
+									Model: agentgateway.ShortString("auto"),
+								},
+								Strategy: agentgateway.AILoadBalancingStrategyCostOptimized,
+							},
+						},
+					},
+				},
+			},
+			wantErr: "DuplicateAILoadBalancingTrigger",
+		},
+		{
+			name: "missing model catalog",
+			gateway: &AgentgatewayHelmGateway{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					AILoadBalancing: &agentgateway.AILoadBalancingSpec{
+						Profiles: []agentgateway.AILoadBalancingProfile{
+							{
+								Name: "cost",
+								Trigger: agentgateway.AILoadBalancingTrigger{
+									Model: agentgateway.ShortString("auto"),
+								},
+								Strategy: agentgateway.AILoadBalancingStrategyCostOptimized,
+							},
+						},
+					},
+				},
+			},
+			wantErr: "MissingModelCatalog",
+		},
+		{
+			name: "empty model catalog source",
+			gateway: &AgentgatewayHelmGateway{
+				AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+					ModelCatalog: &agentgateway.ModelCatalogSpec{
+						Sources: []agentgateway.ModelCatalogSource{{}},
+					},
+					AILoadBalancing: &agentgateway.AILoadBalancingSpec{
+						Profiles: []agentgateway.AILoadBalancingProfile{
+							{
+								Name: "cost",
+								Trigger: agentgateway.AILoadBalancingTrigger{
+									Model: agentgateway.ShortString("auto"),
+								},
+								Strategy: agentgateway.AILoadBalancingStrategyCostOptimized,
+							},
+						},
+					},
+				},
+			},
+			wantErr: "modelCatalog source must specify configMap",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAILoadBalancingEffectiveConfig(tt.gateway)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 // TestAgentgatewayParametersApplier_ApplyToHelmValues_NoAliasing verifies that
 // applying GatewayClass AGWP followed by Gateway AGWP does not mutate the
 // cached GatewayClass object. This reproduces a bug where the first Apply

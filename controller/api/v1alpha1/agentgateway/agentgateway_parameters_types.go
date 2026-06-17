@@ -181,10 +181,13 @@ type AgentgatewayParametersConfigs struct {
 // ModelCatalogSpec configures model cost catalog sources for the agentgateway proxy.
 type ModelCatalogSpec struct {
 	// +optional
+	// +kubebuilder:validation:MaxItems=16
 	Sources []ModelCatalogSource `json:"sources,omitempty"`
 }
 
 // ModelCatalogSource is a single source of model cost catalog data.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.configMap)",message="modelCatalog source must specify configMap"
 type ModelCatalogSource struct {
 	// +optional
 	ConfigMap *ModelCatalogConfigMapRef `json:"configMap,omitempty"`
@@ -209,8 +212,10 @@ type AILoadBalancingSpec struct {
 	// metadata. The first profile whose trigger matches the request is used.
 	//
 	// +optional
+	// +kubebuilder:validation:MaxItems=32
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:XValidation:rule="self.all(p, self.exists_one(q, q.trigger.model == p.trigger.model))",message="aiLoadBalancing profile trigger.model values must be unique"
 	Profiles []AILoadBalancingProfile `json:"profiles,omitempty"`
 }
 

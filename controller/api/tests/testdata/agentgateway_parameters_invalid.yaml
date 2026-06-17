@@ -38,3 +38,40 @@ metadata:
 spec:
   logging:
     format: Unknown
+---
+_err: "aiLoadBalancing profile trigger.model values must be unique"
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: ai-lb-duplicate-trigger
+spec:
+  modelCatalog:
+    sources:
+    - configMap:
+        name: model-costs
+  aiLoadBalancing:
+    profiles:
+    - name: cost-a
+      trigger:
+        model: auto
+      strategy: CostOptimized
+    - name: cost-b
+      trigger:
+        model: auto
+      strategy: CostOptimized
+---
+_err: "modelCatalog source must specify configMap"
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: ai-lb-empty-model-catalog-source
+spec:
+  modelCatalog:
+    sources:
+    - {}
+  aiLoadBalancing:
+    profiles:
+    - name: cost
+      trigger:
+        model: auto
+      strategy: CostOptimized

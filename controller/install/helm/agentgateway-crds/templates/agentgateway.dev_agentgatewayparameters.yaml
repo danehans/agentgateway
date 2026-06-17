@@ -125,10 +125,15 @@ spec:
                       - name
                       - trigger
                       type: object
+                    maxItems: 32
                     type: array
                     x-kubernetes-list-map-keys:
                     - name
                     x-kubernetes-list-type: map
+                    x-kubernetes-validations:
+                    - message: aiLoadBalancing profile trigger.model values must be
+                        unique
+                      rule: self.all(p, self.exists_one(q, q.trigger.model == p.trigger.model))
                 type: object
               deployment:
                 description: |-
@@ -576,6 +581,10 @@ spec:
                           - name
                           type: object
                       type: object
+                      x-kubernetes-validations:
+                      - message: modelCatalog source must specify configMap
+                        rule: has(self.configMap)
+                    maxItems: 16
                     type: array
                 type: object
               podDisruptionBudget:

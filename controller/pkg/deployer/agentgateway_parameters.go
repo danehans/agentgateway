@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"istio.io/istio/pkg/kube/kclient"
@@ -271,6 +272,9 @@ func (g *agentgatewayParametersHelmValuesGenerator) GetValues(ctx context.Contex
 	if resolved.gatewayAGWP != nil && resolved.gatewayAGWP.Spec.ModelCatalog != nil {
 		vals.Agentgateway.ModelCatalog = resolved.gatewayAGWP.Spec.ModelCatalog.DeepCopy()
 	}
+	if err := validateAILoadBalancingEffectiveConfig(vals.Agentgateway); err != nil {
+		return nil, err
+	}
 
 	// Resolve Istio enablement and defaults after gw params so spec.istio takes precedence.
 	ResolveIstioIntegration(vals.Agentgateway, g.inputs.AgwCollections)
@@ -298,6 +302,50 @@ func (g *agentgatewayParametersHelmValuesGenerator) GetValues(ctx context.Contex
 	var jsonVals map[string]any
 	err = JsonConvert(vals, &jsonVals)
 	return jsonVals, err
+}
+
+func validateAILoadBalancingEffectiveConfig(gtw *AgentgatewayHelmGateway) error {
+	if gtw == nil || gtw.AILoadBalancing == nil {
+		return nil
+	}
+	triggerProfiles := map[agentgateway.ShortString]string{}
+	hasCostOptimized := false
+	for _, profile := range gtw.AILoadBalancing.Profiles {
+		if prev, ok := triggerProfiles[profile.Trigger.Model]; ok {
+			return fmt.Errorf(
+				"DuplicateAILoadBalancingTrigger: aiLoadBalancing profiles %q and %q use duplicate trigger.model %q",
+				prev,
+				profile.Name,
+				profile.Trigger.Model,
+			)
+		}
+		triggerProfiles[profile.Trigger.Model] = profile.Name
+
+		if profile.Strategy == agentgateway.AILoadBalancingStrategyCostOptimized {
+			hasCostOptimized = true
+			if profile.Cost != nil &&
+				profile.Cost.MissingPrice != "" &&
+				profile.Cost.MissingPrice != agentgateway.MissingPriceBehaviorFailClosed {
+				return fmt.Errorf(
+					"InvalidAILoadBalancingProfile: CostOptimized profile %q supports only missingPrice=%s",
+					profile.Name,
+					agentgateway.MissingPriceBehaviorFailClosed,
+				)
+			}
+		}
+	}
+	if !hasCostOptimized {
+		return nil
+	}
+	if gtw.ModelCatalog == nil || len(gtw.ModelCatalog.Sources) == 0 {
+		return fmt.Errorf("MissingModelCatalog: CostOptimized AI load balancing requires at least one modelCatalog source")
+	}
+	if slices.ContainsFunc(gtw.ModelCatalog.Sources, func(source agentgateway.ModelCatalogSource) bool {
+		return source.ConfigMap == nil
+	}) {
+		return fmt.Errorf("MissingModelCatalog: modelCatalog source must specify configMap")
+	}
+	return nil
 }
 
 // resolvedParameters holds the resolved parameters for a Gateway, supporting

@@ -6,3 +6,23 @@ spec:
   shutdown:
     max: 0
     min: 0
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: ai-lb-cost-optimized
+spec:
+  modelCatalog:
+    sources:
+    - configMap:
+        name: model-costs
+        key: catalog.json
+  aiLoadBalancing:
+    profiles:
+    - name: cost
+      trigger:
+        model: auto
+      strategy: CostOptimized
+      cost:
+        defaultOutputTokens: 512
+        missingPrice: FailClosed
