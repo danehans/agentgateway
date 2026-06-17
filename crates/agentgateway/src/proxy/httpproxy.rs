@@ -65,6 +65,7 @@ struct AILoadBalancingSelection {
 async fn maybe_select_ai_load_balanced_provider(
 	ai: &llm::AIBackend,
 	inputs: &ProxyInputs,
+	llm_policy: Option<&llm::Policy>,
 	req: &mut Request,
 ) -> Result<Option<AILoadBalancingSelection>, ProxyError> {
 	if !inputs
@@ -88,23 +89,18 @@ async fn maybe_select_ai_load_balanced_provider(
 	let Some(request_model) = json.get("model").and_then(Value::as_str).map(str::to_owned) else {
 		return Ok(None);
 	};
-	let Some(profile) = inputs
-		.cfg
-		.ai_load_balancing
-		.profiles
-		.iter()
-		.find(|profile| profile.trigger.model == request_model)
-	else {
+	let effective_model =
+		resolve_ai_load_balancing_effective_model(request_model.as_str(), llm_policy);
+	let Some(profile) = cost_optimized_profile_for_effective_model(
+		&inputs.cfg.ai_load_balancing.profiles,
+		effective_model.as_str(),
+	) else {
 		return Ok(None);
 	};
-	if profile.strategy != AILoadBalancingStrategy::CostOptimized {
-		return Ok(None);
-	}
 
 	let scheduling_request = llm::ModelSchedulingRequest {
 		requested_model: strng::new(&request_model),
-		// MVP limitation: the proxy has not yet run provider-level model aliasing here.
-		effective_model: strng::new(&request_model),
+		effective_model,
 		route_type,
 		input_format,
 		estimated_input_tokens: estimate_openai_request_input_tokens(&json, bytes.len()),
@@ -121,6 +117,26 @@ async fn maybe_select_ai_load_balanced_provider(
 		selection,
 		profile: strng::new(&profile.name),
 	}))
+}
+
+fn resolve_ai_load_balancing_effective_model(
+	request_model: &str,
+	llm_policy: Option<&llm::Policy>,
+) -> Strng {
+	llm_policy
+		.and_then(|policy| policy.resolve_model_alias(request_model))
+		.cloned()
+		.unwrap_or_else(|| strng::new(request_model))
+}
+
+fn cost_optimized_profile_for_effective_model<'a>(
+	profiles: &'a [AILoadBalancingProfile],
+	effective_model: &str,
+) -> Option<&'a AILoadBalancingProfile> {
+	profiles.iter().find(|profile| {
+		profile.strategy == AILoadBalancingStrategy::CostOptimized
+			&& profile.trigger.model == effective_model
+	})
 }
 
 fn cost_routable_openai_route(path: &str) -> Option<(RouteType, InputFormat)> {
@@ -2038,8 +2054,16 @@ async fn make_backend_call(
 
 	let (mut backend_call, mut maybe_inference) = match backend {
 		Backend::AI(n, ai) => {
-			let ai_lb_selection =
-				maybe_select_ai_load_balanced_provider(ai, inputs.as_ref(), &mut req).await?;
+			let ai_lb_request_policies = route_policies
+				.clone()
+				.merge_backend_policies(policies.llm.clone());
+			let ai_lb_selection = maybe_select_ai_load_balanced_provider(
+				ai,
+				inputs.as_ref(),
+				ai_lb_request_policies.llm.as_deref(),
+				&mut req,
+			)
+			.await?;
 			let (provider, handle, profile_name, selected_model) = match ai_lb_selection {
 				Some(AILoadBalancingSelection { selection, profile }) => (
 					selection.provider,
@@ -3047,6 +3071,7 @@ mod tests {
 	use std::net::SocketAddr;
 
 	use ::http::Method;
+	use agent_core::strng;
 	use serde_json::json;
 	use wiremock::{Mock, ResponseTemplate};
 
@@ -3076,6 +3101,26 @@ mod tests {
 		}
 	}
 
+	fn cost_optimized_profile(trigger_model: &str) -> crate::AILoadBalancingProfile {
+		crate::AILoadBalancingProfile {
+			name: "cost".to_string(),
+			trigger: crate::AILoadBalancingTrigger {
+				model: trigger_model.to_string(),
+			},
+			strategy: crate::AILoadBalancingStrategy::CostOptimized,
+			cost: Default::default(),
+		}
+	}
+
+	fn policy_with_model_alias(from: &str, to: &str) -> crate::llm::Policy {
+		let mut policy = crate::llm::Policy::default();
+		policy
+			.model_aliases
+			.insert(strng::new(from), strng::new(to));
+		policy.compile_model_alias_patterns();
+		policy
+	}
+
 	#[test]
 	fn cost_routable_openai_route_is_limited_to_chat_and_responses() {
 		assert_eq!(
@@ -3092,9 +3137,44 @@ mod tests {
 	}
 
 	#[test]
-	#[ignore = "deferred: cost-optimized trigger matching currently uses the raw OpenAI request model before alias/content-routing effective model state is available"]
-	fn cost_optimized_trigger_uses_effective_model_after_aliasing() {
-		panic!("wire cost-optimized trigger matching to trusted effective model state");
+	fn cost_optimized_trigger_matches_raw_model_when_no_alias_applies() {
+		let profiles = vec![cost_optimized_profile("auto")];
+		let effective_model = super::resolve_ai_load_balancing_effective_model("auto", None);
+
+		let profile =
+			super::cost_optimized_profile_for_effective_model(&profiles, effective_model.as_str())
+				.expect("raw trigger model should match");
+
+		assert_eq!(profile.name, "cost");
+	}
+
+	#[test]
+	fn cost_optimized_trigger_matches_alias_resolved_effective_model() {
+		let profiles = vec![cost_optimized_profile("auto")];
+		let policy = policy_with_model_alias("tenant-default", "auto");
+		let effective_model =
+			super::resolve_ai_load_balancing_effective_model("tenant-default", Some(&policy));
+
+		let profile =
+			super::cost_optimized_profile_for_effective_model(&profiles, effective_model.as_str())
+				.expect("alias-resolved trigger model should match");
+
+		assert_eq!(effective_model.as_str(), "auto");
+		assert_eq!(profile.name, "cost");
+	}
+
+	#[test]
+	fn cost_optimized_trigger_ignores_alias_resolved_non_trigger_model() {
+		let profiles = vec![cost_optimized_profile("auto")];
+		let policy = policy_with_model_alias("tenant-default", "gpt-4o");
+		let effective_model =
+			super::resolve_ai_load_balancing_effective_model("tenant-default", Some(&policy));
+
+		assert_eq!(effective_model.as_str(), "gpt-4o");
+		assert!(
+			super::cost_optimized_profile_for_effective_model(&profiles, effective_model.as_str())
+				.is_none()
+		);
 	}
 
 	#[test]

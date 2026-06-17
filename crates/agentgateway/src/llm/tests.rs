@@ -2080,6 +2080,21 @@ fn provider_and_info(
 	panic!("provider {provider_name} not found")
 }
 
+fn cost_candidate(
+	backend: &AIBackend,
+	provider_name: &str,
+	model: &'static str,
+	cost: Decimal,
+) -> CostOptimizedCandidate {
+	let (provider, info) = provider_and_info(backend, provider_name);
+	CostOptimizedCandidate {
+		provider,
+		info,
+		model: model.into(),
+		cost,
+	}
+}
+
 #[test]
 fn cost_optimized_provider_selection_excludes_unpriced_candidates() {
 	let backend = cost_test_backend(vec![
@@ -2185,36 +2200,83 @@ fn cost_optimized_custom_provider_requires_compatible_native_format() {
 }
 
 #[test]
-fn cost_optimized_health_state_is_compared_before_cost() {
+fn cost_optimized_equal_cost_prefers_higher_endpoint_score() {
+	let backend = cost_test_backend(vec![
+		("slightly-slower", "same-cost-a"),
+		("healthy", "same-cost-b"),
+	]);
+	let (_, slower_info) = provider_and_info(&backend, "slightly-slower");
+	backend
+		.providers
+		.start_request("slightly-slower".into(), &slower_info)
+		.finish_request(true, std::time::Duration::from_millis(10), None, None);
+
+	let slower = cost_candidate(
+		&backend,
+		"slightly-slower",
+		"same-cost-a",
+		Decimal::new(1, 0),
+	);
+	let healthy = cost_candidate(&backend, "healthy", "same-cost-b", Decimal::new(1, 0));
+
+	assert_eq!(
+		compare_cost_optimized_candidates(&slower, &healthy),
+		std::cmp::Ordering::Greater,
+		"equal-cost candidates should preserve endpoint score tie-breaking"
+	);
+}
+
+#[test]
+fn cost_optimized_degraded_lower_cost_loses_to_healthy_higher_cost() {
 	let backend = cost_test_backend(vec![
 		("cheap-degraded", "cheap"),
 		("expensive-healthy", "expensive"),
 	]);
-	let (cheap_provider, cheap_info) = provider_and_info(&backend, "cheap-degraded");
-	let (expensive_provider, expensive_info) = provider_and_info(&backend, "expensive-healthy");
-
+	let (_, cheap_info) = provider_and_info(&backend, "cheap-degraded");
 	backend
 		.providers
 		.start_request("cheap-degraded".into(), &cheap_info)
 		.finish_request(false, std::time::Duration::from_millis(1), None, None);
 
-	let cheap = CostOptimizedCandidate {
-		provider: cheap_provider,
-		info: cheap_info,
-		model: "cheap".into(),
-		cost: Decimal::new(1, 6),
-	};
-	let expensive = CostOptimizedCandidate {
-		provider: expensive_provider,
-		info: expensive_info,
-		model: "expensive".into(),
-		cost: Decimal::new(1, 0),
-	};
+	let cheap = cost_candidate(&backend, "cheap-degraded", "cheap", Decimal::new(1, 6));
+	let expensive = cost_candidate(
+		&backend,
+		"expensive-healthy",
+		"expensive",
+		Decimal::new(1, 0),
+	);
 
 	assert_eq!(
 		compare_cost_optimized_candidates(&cheap, &expensive),
 		std::cmp::Ordering::Greater,
-		"degraded health should take precedence over lower cost in the comparator"
+		"endpoint score should outweigh lower cost for clearly degraded candidates"
+	);
+}
+
+#[test]
+fn cost_optimized_comparable_endpoint_score_prefers_lower_cost() {
+	let backend = cost_test_backend(vec![
+		("cheap-comparable", "cheap"),
+		("expensive-healthy", "expensive"),
+	]);
+	let (_, cheap_info) = provider_and_info(&backend, "cheap-comparable");
+	backend
+		.providers
+		.start_request("cheap-comparable".into(), &cheap_info)
+		.finish_request(true, std::time::Duration::from_millis(10), None, None);
+
+	let cheap = cost_candidate(&backend, "cheap-comparable", "cheap", Decimal::new(1, 6));
+	let expensive = cost_candidate(
+		&backend,
+		"expensive-healthy",
+		"expensive",
+		Decimal::new(1, 0),
+	);
+
+	assert_eq!(
+		compare_cost_optimized_candidates(&cheap, &expensive),
+		std::cmp::Ordering::Less,
+		"lower cost should win when endpoint scores are comparable"
 	);
 }
 

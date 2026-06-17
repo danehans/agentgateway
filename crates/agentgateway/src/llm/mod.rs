@@ -162,15 +162,31 @@ fn select_lowest_cost_p2c(
 		.min_by(compare_cost_optimized_candidates)
 }
 
+// Treat endpoint scores within this ratio as comparable, allowing cost to break the
+// tie while still letting the existing P2C health/load signal outweigh cheaper
+// but clearly degraded candidates.
+const COST_OPTIMIZED_COMPARABLE_ENDPOINT_SCORE_RATIO: f64 = 0.85;
+
 fn compare_cost_optimized_candidates(
 	a: &CostOptimizedCandidate,
 	b: &CostOptimizedCandidate,
 ) -> std::cmp::Ordering {
-	b.info
-		.health_score()
-		.total_cmp(&a.info.health_score())
-		.then_with(|| a.cost.cmp(&b.cost))
-		.then_with(|| b.info.score().total_cmp(&a.info.score()))
+	let a_score = a.info.score();
+	let b_score = b.info.score();
+	if !cost_optimized_endpoint_scores_comparable(a_score, b_score) {
+		return b_score.total_cmp(&a_score);
+	}
+	a.cost
+		.cmp(&b.cost)
+		.then_with(|| b_score.total_cmp(&a_score))
+}
+
+fn cost_optimized_endpoint_scores_comparable(a_score: f64, b_score: f64) -> bool {
+	let higher = a_score.max(b_score);
+	if higher <= f64::EPSILON {
+		return true;
+	}
+	a_score.min(b_score) / higher >= COST_OPTIMIZED_COMPARABLE_ENDPOINT_SCORE_RATIO
 }
 
 #[derive(Debug)]
