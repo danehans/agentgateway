@@ -1616,6 +1616,11 @@ message AIBackend {
     repeated ProviderFormatConfig formats = 1;
     optional string model = 2;
     optional string provider_override = 3;
+    message CostCatalog {
+      optional string provider = 1;
+      optional string model = 2;
+    }
+    optional CostCatalog cost_catalog = 4;
   }
 
   message Provider {

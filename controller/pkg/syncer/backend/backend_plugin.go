@@ -544,8 +544,9 @@ func translateLLMProvider(ctx plugins.PolicyCtx, namespace string, llm *agentgat
 		}
 		provider.Provider = &api.AIBackend_Provider_Custom{
 			Custom: &api.AIBackend_Custom{
-				Formats: formats,
-				Model:   llm.Custom.Model,
+				Formats:     formats,
+				Model:       llm.Custom.Model,
+				CostCatalog: translateCustomProviderCostCatalog(llm.Custom.Cost),
 			},
 		}
 		if llm.Custom.BackendRef != nil {
@@ -560,6 +561,16 @@ func translateLLMProvider(ctx plugins.PolicyCtx, namespace string, llm *agentgat
 	}
 
 	return provider, nil
+}
+
+func translateCustomProviderCostCatalog(cost *agentgateway.CustomProviderCost) *api.AIBackend_Custom_CostCatalog {
+	if cost == nil || cost.Catalog == nil {
+		return nil
+	}
+	return &api.AIBackend_Custom_CostCatalog{
+		Provider: cost.Catalog.Provider,
+		Model:    cost.Catalog.Model,
+	}
 }
 
 func translateProviderFormats(formats []agentgateway.ProviderFormatConfig) ([]*api.AIBackend_ProviderFormatConfig, error) {

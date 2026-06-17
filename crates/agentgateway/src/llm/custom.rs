@@ -13,6 +13,8 @@ pub struct Provider {
 	/// a bare custom provider may set it to match a catalog entry. Falls back to "custom".
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub provider_override: Option<Strng>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub cost_catalog: Option<CostCatalogIdentity>,
 	pub formats: Vec<ProviderFormatConfig>,
 }
 
@@ -52,6 +54,14 @@ impl Provider {
 
 impl super::Provider for Provider {
 	const NAME: Strng = strng::literal!("custom");
+}
+
+#[apply(schema!)]
+pub struct CostCatalogIdentity {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub provider: Option<Strng>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub model: Option<Strng>,
 }
 
 #[apply(schema!)]
@@ -107,6 +117,7 @@ mod tests {
 		Provider {
 			model: None,
 			provider_override: None,
+			cost_catalog: None,
 			formats: supported_formats
 				.into_iter()
 				.map(|format| ProviderFormatConfig { format, path: None })
@@ -144,6 +155,7 @@ mod tests {
 		let provider = Provider {
 			model: None,
 			provider_override: None,
+			cost_catalog: None,
 			formats: vec![
 				ProviderFormatConfig {
 					format: ProviderFormat::Completions,

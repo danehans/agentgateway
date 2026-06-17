@@ -515,6 +515,7 @@ pub fn parse_config(
 		model_catalog: crate::ModelCatalogConfig {
 			sources: model_catalog_sources,
 		},
+		ai_load_balancing: raw.ai_load_balancing.unwrap_or_default(),
 		session_encoder,
 		oidc_cookie_encoder,
 		hbone: Arc::new(agent_hbone::Config {

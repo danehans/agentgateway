@@ -1551,6 +1551,7 @@ async fn llm_custom_rerank() {
 		provider: AIProvider::Custom(custom::Provider {
 			model: None,
 			provider_override: None,
+			cost_catalog: None,
 			formats: vec![custom::ProviderFormatConfig {
 				format: custom::ProviderFormat::Rerank,
 				path: None,

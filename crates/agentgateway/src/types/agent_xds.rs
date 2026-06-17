@@ -1370,6 +1370,12 @@ pub(crate) fn backend_with_policies_from_proto(
 							AIProvider::Custom(llm::custom::Provider {
 								model: custom.model.as_deref().map(strng::new),
 								provider_override: custom.provider_override.as_deref().map(strng::new),
+								cost_catalog: custom.cost_catalog.as_ref().map(|cost| {
+									llm::custom::CostCatalogIdentity {
+										provider: cost.provider.as_deref().map(strng::new),
+										model: cost.model.as_deref().map(strng::new),
+									}
+								}),
 								formats,
 							})
 						},
@@ -4131,6 +4137,7 @@ mod tests {
 							],
 							model: None,
 							provider_override: None,
+							cost_catalog: None,
 						})),
 						inline_policies: vec![],
 					}],

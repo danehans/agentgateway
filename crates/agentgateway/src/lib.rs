@@ -146,6 +146,9 @@ pub struct RawConfig {
 	/// Model cost catalog sources; entries are merged in order, with later entries taking precedence.
 	model_catalog: Option<Vec<ModelCatalogSource>>,
 
+	/// AI load-balancing profiles activated by request metadata.
+	ai_load_balancing: Option<AILoadBalancingConfig>,
+
 	ca_address: Option<String>,
 	ca_auth_token: Option<String>,
 	xds_address: Option<String>,
@@ -527,6 +530,7 @@ pub struct Config {
 	pub mcp: McpConfig,
 	pub dynamic_ca_cert_cache: DynamicCaCertCacheConfig,
 	pub model_catalog: ModelCatalogConfig,
+	pub ai_load_balancing: AILoadBalancingConfig,
 }
 
 #[derive(serde::Serialize, Clone, Debug, Default)]
@@ -542,6 +546,83 @@ pub struct ModelCatalogConfig {
 pub enum ModelCatalogSource {
 	File { file: PathBuf },
 	Inline { inline: String },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct AILoadBalancingConfig {
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub profiles: Vec<AILoadBalancingProfile>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct AILoadBalancingProfile {
+	pub name: String,
+	pub trigger: AILoadBalancingTrigger,
+	#[serde(default)]
+	pub strategy: AILoadBalancingStrategy,
+	#[serde(default)]
+	pub cost: CostOptimizedLoadBalancingConfig,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct AILoadBalancingTrigger {
+	pub model: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub enum AILoadBalancingStrategy {
+	#[default]
+	P2C,
+	CostOptimized,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub struct CostOptimizedLoadBalancingConfig {
+	#[serde(default = "default_cost_optimized_output_tokens")]
+	pub default_output_tokens: u64,
+	#[serde(default)]
+	pub missing_price: MissingPriceBehavior,
+}
+
+impl CostOptimizedLoadBalancingConfig {
+	pub fn default_output_tokens(&self) -> u64 {
+		if self.default_output_tokens == 0 {
+			DEFAULT_COST_OPTIMIZED_OUTPUT_TOKENS
+		} else {
+			self.default_output_tokens
+		}
+	}
+}
+
+impl Default for CostOptimizedLoadBalancingConfig {
+	fn default() -> Self {
+		Self {
+			default_output_tokens: default_cost_optimized_output_tokens(),
+			missing_price: MissingPriceBehavior::default(),
+		}
+	}
+}
+
+pub const DEFAULT_COST_OPTIMIZED_OUTPUT_TOKENS: u64 = 512;
+
+fn default_cost_optimized_output_tokens() -> u64 {
+	DEFAULT_COST_OPTIMIZED_OUTPUT_TOKENS
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+pub enum MissingPriceBehavior {
+	#[default]
+	FailClosed,
 }
 
 #[apply(schema!)]

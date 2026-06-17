@@ -270,6 +270,47 @@ func TestAgentgatewayParametersApplier_ApplyToHelmValues_RawConfig(t *testing.T)
 	assert.Equal(t, vals.Agentgateway.RawConfig.Raw, rawConfigJSON)
 }
 
+func TestAgentgatewayParametersApplier_ApplyToHelmValues_AILoadBalancing(t *testing.T) {
+	params := &agentgateway.AgentgatewayParameters{
+		Spec: agentgateway.AgentgatewayParametersSpec{
+			AgentgatewayParametersConfigs: agentgateway.AgentgatewayParametersConfigs{
+				AILoadBalancing: &agentgateway.AILoadBalancingSpec{
+					Profiles: []agentgateway.AILoadBalancingProfile{
+						{
+							Name: "cost-optimized",
+							Trigger: agentgateway.AILoadBalancingTrigger{
+								Model: agentgateway.ShortString("auto"),
+							},
+							Strategy: agentgateway.AILoadBalancingStrategyCostOptimized,
+							Cost: &agentgateway.CostOptimizedLoadBalancingSpec{
+								DefaultOutputTokens: 512,
+								MissingPrice:        agentgateway.MissingPriceBehaviorFailClosed,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	applier := NewAgentgatewayParametersApplier(params)
+	vals := &HelmConfig{
+		Agentgateway: &AgentgatewayHelmGateway{},
+	}
+
+	applier.ApplyToHelmValues(vals)
+
+	require.NotNil(t, vals.Agentgateway.AILoadBalancing)
+	require.Len(t, vals.Agentgateway.AILoadBalancing.Profiles, 1)
+	profile := vals.Agentgateway.AILoadBalancing.Profiles[0]
+	assert.Equal(t, "cost-optimized", profile.Name)
+	assert.Equal(t, agentgateway.ShortString("auto"), profile.Trigger.Model)
+	assert.Equal(t, agentgateway.AILoadBalancingStrategyCostOptimized, profile.Strategy)
+	require.NotNil(t, profile.Cost)
+	assert.Equal(t, int32(512), profile.Cost.DefaultOutputTokens)
+	assert.Equal(t, agentgateway.MissingPriceBehaviorFailClosed, profile.Cost.MissingPrice)
+}
+
 // TestAgentgatewayParametersApplier_ApplyToHelmValues_NoAliasing verifies that
 // applying GatewayClass AGWP followed by Gateway AGWP does not mutate the
 // cached GatewayClass object. This reproduces a bug where the first Apply

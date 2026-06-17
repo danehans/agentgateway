@@ -13,6 +13,7 @@ use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use rand::RngExt;
 use rand::seq::{IndexedRandom, IteratorRandom};
+use serde_json::Value;
 use tracing::{debug, trace};
 use types::agent::*;
 use types::discovery::*;
@@ -54,6 +55,123 @@ fn select_backend(route: &Route, _req: &Request) -> Option<RouteBackendReference
 		.choose_weighted(&mut rand::rng(), |b| b.weight)
 		.ok()
 		.cloned()
+}
+
+struct AILoadBalancingSelection {
+	selection: llm::AIProviderSelection,
+	profile: Strng,
+}
+
+async fn maybe_select_ai_load_balanced_provider(
+	ai: &llm::AIBackend,
+	inputs: &ProxyInputs,
+	req: &mut Request,
+) -> Result<Option<AILoadBalancingSelection>, ProxyError> {
+	if !inputs
+		.cfg
+		.ai_load_balancing
+		.profiles
+		.iter()
+		.any(|profile| profile.strategy == AILoadBalancingStrategy::CostOptimized)
+	{
+		return Ok(None);
+	}
+	if !is_cost_routable_openai_path(req.uri().path()) {
+		return Ok(None);
+	}
+
+	let bytes = read_and_restore_request_body(req).await?;
+	let mut json: Value = match serde_json::from_slice(bytes.as_ref()) {
+		Ok(json) => json,
+		Err(_) => return Ok(None),
+	};
+	let Some(request_model) = json.get("model").and_then(Value::as_str).map(str::to_owned) else {
+		return Ok(None);
+	};
+	let Some(profile) = inputs
+		.cfg
+		.ai_load_balancing
+		.profiles
+		.iter()
+		.find(|profile| profile.trigger.model == request_model)
+	else {
+		return Ok(None);
+	};
+	if profile.strategy != AILoadBalancingStrategy::CostOptimized {
+		return Ok(None);
+	}
+
+	let input_tokens = estimate_openai_request_input_tokens(&json, bytes.len());
+	let output_tokens =
+		estimate_openai_request_output_tokens(&json).unwrap_or(profile.cost.default_output_tokens());
+	let selection = ai
+		.select_cost_optimized_provider(
+			request_model.as_str(),
+			input_tokens,
+			output_tokens,
+			inputs.model_catalog.as_ref(),
+		)
+		.map_err(|err| ProxyError::ProcessingString(err.to_string()))?
+		.ok_or(ProxyError::NoHealthyEndpoints)?;
+
+	rewrite_openai_request_model(req, &mut json, selection.model.as_str())?;
+	Ok(Some(AILoadBalancingSelection {
+		selection,
+		profile: strng::new(&profile.name),
+	}))
+}
+
+fn is_cost_routable_openai_path(path: &str) -> bool {
+	path.ends_with("/chat/completions") || path.ends_with("/responses")
+}
+
+async fn read_and_restore_request_body(req: &mut Request) -> Result<bytes::Bytes, ProxyError> {
+	let limit = crate::http::buffer_limit(req);
+	let body = std::mem::replace(req.body_mut(), crate::http::Body::empty());
+	let bytes = crate::http::read_body_with_limit(body, limit)
+		.await
+		.map_err(ProxyError::Body)?;
+	*req.body_mut() = crate::http::Body::from(bytes.clone());
+	Ok(bytes)
+}
+
+fn rewrite_openai_request_model(
+	req: &mut Request,
+	json: &mut Value,
+	model: &str,
+) -> Result<(), ProxyError> {
+	let Value::Object(map) = json else {
+		return Err(ProxyError::ProcessingString(
+			"AI load balancing requires a JSON object request".to_string(),
+		));
+	};
+	map.insert("model".to_string(), Value::String(model.to_string()));
+	let bytes = serde_json::to_vec(json)
+		.map_err(|err| ProxyError::ProcessingString(format!("failed to rewrite model: {err}")))?;
+	req.headers_mut().remove(header::CONTENT_LENGTH);
+	*req.body_mut() = crate::http::Body::from(bytes);
+	Ok(())
+}
+
+fn estimate_openai_request_input_tokens(json: &Value, fallback_bytes: usize) -> u64 {
+	let value = json
+		.get("messages")
+		.or_else(|| json.get("input"))
+		.or_else(|| json.get("prompt"))
+		.unwrap_or(json);
+	let len = match value {
+		Value::String(s) => s.len(),
+		other => serde_json::to_string(other)
+			.map(|s| s.len())
+			.unwrap_or(fallback_bytes),
+	};
+	((len as u64).saturating_add(3)) / 4
+}
+
+fn estimate_openai_request_output_tokens(json: &Value) -> Option<u64> {
+	["max_completion_tokens", "max_tokens", "max_output_tokens"]
+		.into_iter()
+		.find_map(|key| json.get(key).and_then(Value::as_u64))
 }
 
 #[derive(Debug)]
@@ -1912,7 +2030,30 @@ async fn make_backend_call(
 
 	let (mut backend_call, mut maybe_inference) = match backend {
 		Backend::AI(n, ai) => {
-			let (provider, handle) = ai.select_provider().ok_or(ProxyError::NoHealthyEndpoints)?;
+			let ai_lb_selection =
+				maybe_select_ai_load_balanced_provider(ai, inputs.as_ref(), &mut req).await?;
+			let (provider, handle, profile_name, selected_model) = match ai_lb_selection {
+				Some(AILoadBalancingSelection { selection, profile }) => (
+					selection.provider,
+					selection.handle,
+					Some(profile),
+					Some(selection.model),
+				),
+				None => {
+					let (provider, handle) = ai.select_provider().ok_or(ProxyError::NoHealthyEndpoints)?;
+					(provider, handle, None, None)
+				},
+			};
+			let selected_provider = provider.provider.provider();
+			let selected_model = selected_model.or_else(|| provider.provider.override_model());
+			log.add({
+				let selected_provider = selected_provider.clone();
+				move |l| {
+					l.ai_selected_provider = Some(selected_provider);
+					l.ai_selected_model = selected_model;
+					l.ai_load_balancing_profile = profile_name;
+				}
+			});
 			log.add(move |l| l.request_handle = Some(handle));
 			let sub_backend_name = BackendTargetRef::Backend {
 				name: n.name.as_ref(),

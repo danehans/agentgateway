@@ -12,8 +12,15 @@ data:
     {{- /* Start with rawConfig as base, then merge typed config on top */ -}}
     {{- $baseConfig := $gateway.rawConfig | default dict }}
     {{- $typedConfig := dict }}
+    {{- $typedConfigValues := dict }}
     {{- with ($gateway.logging).format }}
-    {{- $typedConfig = dict "config" (dict "logging" (dict "format" .)) }}
+    {{- $_ := set $typedConfigValues "logging" (dict "format" .) }}
+    {{- end }}
+    {{- with $gateway.aiLoadBalancing }}
+    {{- $_ := set $typedConfigValues "aiLoadBalancing" . }}
+    {{- end }}
+    {{- if $typedConfigValues }}
+    {{- $typedConfig = dict "config" $typedConfigValues }}
     {{- end }}
     {{- /* Merge: typed config takes precedence over rawConfig */ -}}
     {{- $finalConfig := merge $typedConfig $baseConfig }}

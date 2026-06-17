@@ -628,6 +628,13 @@ impl<T: Clone + Sync + Send + 'static> EndpointSet<T> {
 		ActiveEndpointsIter(self.best_bucket())
 	}
 
+	pub fn priority_iter(&self) -> impl Iterator<Item = ActiveEndpointsIter<T>> + '_ {
+		self
+			.buckets
+			.iter()
+			.map(|bucket| ActiveEndpointsIter(bucket.load_full()))
+	}
+
 	/// Visit every endpoint, returning the first `Some` produced by `f`. Active
 	/// endpoints from all buckets are visited before any rejected endpoint, e.g.:
 	///   active in bucket 0
@@ -1069,6 +1076,12 @@ pub struct ActiveEndpointsIter<T>(Arc<EndpointGroup<T>>);
 impl<T> ActiveEndpointsIter<T> {
 	pub fn iter(&self) -> impl ExactSizeIterator<Item = (&Arc<T>, &Arc<EndpointInfo>)> {
 		self.index().iter().map(|(_k, v)| (&v.endpoint, &v.info))
+	}
+	pub fn active(&self) -> impl ExactSizeIterator<Item = (&Arc<T>, &Arc<EndpointInfo>)> {
+		self.0.active.iter().map(|(_k, v)| (&v.endpoint, &v.info))
+	}
+	pub fn rejected(&self) -> impl ExactSizeIterator<Item = (&Arc<T>, &Arc<EndpointInfo>)> {
+		self.0.rejected.iter().map(|(_k, v)| (&v.endpoint, &v.info))
 	}
 	pub fn index(&self) -> &IndexMap<EndpointKey, EndpointWithInfo<T>> {
 		if self.is_active_phase() {

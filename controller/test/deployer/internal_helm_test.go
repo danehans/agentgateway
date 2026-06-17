@@ -542,9 +542,9 @@ wIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQBtestcertdata
 				t.Helper()
 				assert.Contains(t, outputYaml, "MODEL_CATALOG_PATHS",
 					"deployment should set MODEL_CATALOG_PATHS to the mounted ConfigMap file path")
-				assert.Contains(t, outputYaml, "/config/model-catalog/my-model-costs.json",
+				assert.Contains(t, outputYaml, "/model-catalog/my-model-costs/catalog.json",
 					"MODEL_CATALOG_PATHS should point to the ConfigMap mount path")
-				assert.Contains(t, outputYaml, "mountPath: /config/model-catalog/my-model-costs.json",
+				assert.Contains(t, outputYaml, "mountPath: /model-catalog/my-model-costs",
 					"deployment should have a volume mount for the model catalog ConfigMap")
 				assert.Contains(t, outputYaml, "name: my-model-costs",
 					"deployment volumes should reference the model catalog ConfigMap by name")

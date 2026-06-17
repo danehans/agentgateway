@@ -10,6 +10,7 @@ use axum_extra::headers::authorization::Bearer;
 use headers::{ContentEncoding, HeaderMapExt};
 pub use policy::Policy;
 use rand::RngExt;
+use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use tiktoken_rs::CoreBPE;
 use tiktoken_rs::tokenizer::{Tokenizer, get_tokenizer};
@@ -22,7 +23,7 @@ use crate::proxy::httpproxy::PolicyClient;
 use crate::store::{BackendPolicies, LLMResponsePolicies};
 use crate::telemetry::log::{AsyncLog, RequestLog};
 use crate::types::agent::{BackendTrafficPolicy, SimpleBackendReference, Target};
-use crate::types::loadbalancer::{ActiveHandle, EndpointWithInfo};
+use crate::types::loadbalancer::{ActiveHandle, EndpointInfo, EndpointWithInfo};
 use crate::*;
 
 pub mod anthropic;
@@ -87,6 +88,96 @@ impl AIBackend {
 		let handle = self.providers.start_request(ep.name.clone(), ep_info);
 		Some((ep, handle))
 	}
+
+	pub fn select_cost_optimized_provider(
+		&self,
+		request_model: &str,
+		input_tokens: u64,
+		output_tokens: u64,
+		model_catalog: &cost::ModelCatalog,
+	) -> Result<Option<AIProviderSelection>, CostOptimizedSelectionError> {
+		let mut saw_active_candidate = false;
+		for group in self.providers.priority_iter() {
+			let mut candidates = Vec::new();
+			for (provider, info) in group.active() {
+				saw_active_candidate = true;
+				let Some(model) = provider.provider.cost_catalog_model(request_model) else {
+					continue;
+				};
+				let catalog_provider = provider.provider.cost_catalog_provider();
+				let projection = model_catalog.estimate_request(
+					catalog_provider.as_str(),
+					model.as_str(),
+					input_tokens,
+					output_tokens,
+				);
+				let Some(cost) = projection.cost.as_ref().map(|cost| cost.total()) else {
+					continue;
+				};
+				candidates.push(CostOptimizedCandidate {
+					provider: provider.clone(),
+					info: info.clone(),
+					model,
+					cost,
+				});
+			}
+			if let Some(candidate) = select_lowest_cost_p2c(candidates) {
+				let handle = self
+					.providers
+					.start_request(candidate.provider.name.clone(), &candidate.info);
+				return Ok(Some(AIProviderSelection {
+					provider: candidate.provider,
+					handle,
+					model: candidate.model,
+				}));
+			}
+		}
+		if saw_active_candidate {
+			Err(CostOptimizedSelectionError::NoPricedCandidates)
+		} else {
+			Ok(None)
+		}
+	}
+}
+
+fn select_lowest_cost_p2c(
+	candidates: Vec<CostOptimizedCandidate>,
+) -> Option<CostOptimizedCandidate> {
+	if candidates.is_empty() {
+		return None;
+	}
+	let len = candidates.len();
+	let a = rand::rng().random_range(0..len);
+	let b = rand::rng().random_range(0..len);
+	[a, b]
+		.into_iter()
+		.map(|idx| candidates[idx].clone())
+		.min_by(|a, b| {
+			a.cost
+				.cmp(&b.cost)
+				.then_with(|| b.info.score().total_cmp(&a.info.score()))
+		})
+}
+
+#[derive(Debug)]
+pub struct AIProviderSelection {
+	pub provider: Arc<NamedAIProvider>,
+	pub handle: ActiveHandle,
+	pub model: Strng,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CostOptimizedSelectionError {
+	#[error("cost optimized AI load balancing found no priced provider/model candidates")]
+	NoPricedCandidates,
+}
+
+#[derive(Clone)]
+struct CostOptimizedCandidate {
+	provider: Arc<NamedAIProvider>,
+	info: Arc<EndpointInfo>,
+	model: Strng,
+	cost: Decimal,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -352,6 +443,10 @@ pub enum RequestResult {
 	Rejected(Response),
 }
 
+fn concrete_request_model(request_model: &str) -> Option<Strng> {
+	(!request_model.is_empty() && request_model != "auto").then(|| strng::new(request_model))
+}
+
 impl AIProvider {
 	pub fn provider(&self) -> Strng {
 		match self {
@@ -378,6 +473,30 @@ impl AIProvider {
 			AIProvider::Azure(p) => p.model.clone(),
 			AIProvider::Copilot(p) => p.model.clone(),
 			AIProvider::Custom(p) => p.model.clone(),
+		}
+	}
+	pub fn cost_catalog_provider(&self) -> Strng {
+		match self {
+			AIProvider::Custom(p) => p
+				.cost_catalog
+				.as_ref()
+				.and_then(|catalog| catalog.provider.clone())
+				.or_else(|| p.provider_override.clone())
+				.unwrap_or(custom::Provider::NAME),
+			_ => self.provider(),
+		}
+	}
+	pub fn cost_catalog_model(&self, request_model: &str) -> Option<Strng> {
+		match self {
+			AIProvider::Custom(p) => p
+				.cost_catalog
+				.as_ref()
+				.and_then(|catalog| catalog.model.clone())
+				.or_else(|| p.model.clone())
+				.or_else(|| concrete_request_model(request_model)),
+			_ => self
+				.override_model()
+				.or_else(|| concrete_request_model(request_model)),
 		}
 	}
 	/// Default backend policies (TLS + auth) for connecting to the provider. Split from

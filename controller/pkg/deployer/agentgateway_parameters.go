@@ -143,6 +143,7 @@ func (a *AgentgatewayParametersApplier) ApplyToHelmValues(vals *HelmConfig) {
 		}
 	}
 	setIfNonNil(&res.RawConfig, configs.RawConfig)
+	setIfNonNil(&res.AILoadBalancing, configs.AILoadBalancing)
 
 	// Apply logging.level as RUST_LOG first, then merge explicit env vars on top.
 	// This ensures explicit env vars override logging.level if both specify RUST_LOG.

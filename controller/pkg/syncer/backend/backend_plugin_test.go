@@ -780,6 +780,44 @@ func TestBuildAIBackend(t *testing.T) {
 	}
 }
 
+func TestBuildAIBackendTranslatesCustomProviderCostCatalog(t *testing.T) {
+	provider := agentgateway.ShortString("local")
+	model := agentgateway.ShortString("llama-3.1")
+	backend := &agentgateway.AgentgatewayBackend{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "custom-cost-backend",
+			Namespace: "test-ns",
+		},
+		Spec: agentgateway.AgentgatewayBackendSpec{
+			AI: &agentgateway.AIBackend{
+				LLM: &agentgateway.LLMProvider{
+					Custom: &agentgateway.CustomProvider{
+						Formats: []agentgateway.ProviderFormatConfig{
+							{Type: agentgateway.ProviderFormatCompletions},
+						},
+						Cost: &agentgateway.CustomProviderCost{
+							Catalog: &agentgateway.CustomProviderCostCatalog{
+								Provider: &provider,
+								Model:    &model,
+							},
+						},
+					},
+					Host: "llm.example.com",
+					Port: 443,
+				},
+			},
+		},
+	}
+
+	ctx := testutils.BuildMockPolicyContext(t, nil)
+	result, err := agentgatewaybackend.BuildAgwBackend(ctx, backend)
+	assert.NoError(t, err)
+	costCatalog := result[0].GetAi().ProviderGroups[0].Providers[0].GetCustom().CostCatalog
+
+	assert.Equal(t, costCatalog.GetProvider(), "local")
+	assert.Equal(t, costCatalog.GetModel(), "llama-3.1")
+}
+
 func TestBuildAgwBackendReferencesIncludesCustomProviderBackendRefs(t *testing.T) {
 	backend := &agentgateway.AgentgatewayBackend{
 		ObjectMeta: metav1.ObjectMeta{

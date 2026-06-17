@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/agentgateway/agentgateway/controller/pkg/utils/requestutils/curl"
 	"github.com/agentgateway/agentgateway/controller/test/e2e/base"
@@ -26,6 +27,7 @@ var (
 	// manifests
 	setupManifest            = manifest("aibackend", "setup.yaml")
 	failoverEvictionManifest = manifest("aibackend", "failover_eviction.yaml")
+	costOptimizedManifest    = manifest("aibackend-cost", "setup.yaml")
 )
 
 func TestAIBackend(tt *testing.T) {
@@ -44,6 +46,48 @@ func TestAIBackend(tt *testing.T) {
 	t.Run("Failover", func(t base.Test) {
 		t.Apply(failoverEvictionManifest)
 		testAIBackendFailover(t)
+	})
+}
+
+func TestAIBackendCostOptimizedModelRouting(tt *testing.T) {
+	t := New(tt, base.WithMinGwApiVersion(base.GwApiRequireRouteNames))
+	t.Apply(costOptimizedManifest)
+
+	gatewayName := types.NamespacedName{
+		Namespace: "default",
+		Name:      "ai-cost-router",
+	}
+	gateway := base.Gateway{
+		NamespacedName: gatewayName,
+		Address:        base.ResolveGatewayAddress(t, t.Ctx, t.TestInstallation, gatewayName),
+	}
+
+	t.Run("SelectsLowestCostModel", func(t base.Test) {
+		gateway.Send(
+			t,
+			&testmatchers.HttpResponse{
+				StatusCode: http.StatusOK,
+				Headers: map[string]any{
+					"x-selected-request-model":  "meta-llama/Llama-3.1-8B-Instruct",
+					"x-selected-response-model": "meta-llama/Llama-3.1-8B-Instruct",
+					"x-selected-provider":       "openai",
+				},
+			},
+			curl.WithPath("/v1/chat/completions"),
+			curl.WithPostBody(`{"model":"auto","messages":[{"role":"user","content":"Which model should answer?"}],"max_tokens":8}`),
+			curl.WithHeader("Content-Type", "application/json"),
+		)
+	})
+
+	t.Run("FailsClosedWhenNoPricedCandidatesRemain", func(t base.Test) {
+		gateway.Send(
+			t,
+			base.Expect(http.StatusServiceUnavailable),
+			curl.WithPath("/v1/chat/completions"),
+			curl.WithPostBody(`{"model":"auto","messages":[{"role":"user","content":"This should not route without pricing."}],"max_tokens":8}`),
+			curl.WithHeader("Content-Type", "application/json"),
+			curl.WithHeader("x-cost-test", "unpriced"),
+		)
 	})
 }
 

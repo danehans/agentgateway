@@ -169,6 +169,13 @@ type AgentgatewayParametersConfigs struct {
 	//
 	// +optional
 	ModelCatalog *ModelCatalogSpec `json:"modelCatalog,omitempty"`
+
+	// Gateway-scoped AI load-balancing profiles. Profiles are selected by request
+	// metadata, such as the requested model. When no profile trigger matches, AI
+	// backends continue to use the default P2C load-balancing behavior.
+	//
+	// +optional
+	AILoadBalancing *AILoadBalancingSpec `json:"aiLoadBalancing,omitempty"`
 }
 
 // ModelCatalogSpec configures model cost catalog sources for the agentgateway proxy.
@@ -195,6 +202,98 @@ type ModelCatalogConfigMapRef struct {
 	// +optional
 	Key string `json:"key,omitempty"`
 }
+
+// AILoadBalancingSpec configures gateway-scoped AI load-balancing profiles.
+type AILoadBalancingSpec struct {
+	// Profiles defines load-balancing behavior that can be activated by request
+	// metadata. The first profile whose trigger matches the request is used.
+	//
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Profiles []AILoadBalancingProfile `json:"profiles,omitempty"`
+}
+
+// AILoadBalancingProfile defines an AI load-balancing strategy and when it applies.
+type AILoadBalancingProfile struct {
+	// Name identifies this profile.
+	//
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// Trigger defines the request metadata that activates this profile.
+	//
+	// +required
+	Trigger AILoadBalancingTrigger `json:"trigger"`
+
+	// Strategy selects the load-balancing behavior to apply when the trigger
+	// matches. P2C preserves the existing behavior. CostOptimized filters out
+	// unpriced candidates, estimates request cost from the configured model
+	// catalog, and then uses P2C among the lowest-cost candidates.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=P2C;CostOptimized
+	// +kubebuilder:default=P2C
+	Strategy AILoadBalancingStrategy `json:"strategy,omitempty"`
+
+	// Cost configures the CostOptimized strategy.
+	//
+	// +optional
+	Cost *CostOptimizedLoadBalancingSpec `json:"cost,omitempty"`
+}
+
+// AILoadBalancingTrigger identifies requests that should use a profile.
+type AILoadBalancingTrigger struct {
+	// Model matches the effective requested model, for example "auto".
+	//
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Model ShortString `json:"model"`
+}
+
+// The AI load-balancing strategy.
+//
+// +k8s:enum
+type AILoadBalancingStrategy string
+
+const (
+	// AILoadBalancingStrategyP2C preserves the existing power-of-two-choices behavior.
+	AILoadBalancingStrategyP2C AILoadBalancingStrategy = "P2C"
+	// AILoadBalancingStrategyCostOptimized estimates request cost and prefers lower-cost candidates.
+	AILoadBalancingStrategyCostOptimized AILoadBalancingStrategy = "CostOptimized"
+)
+
+// CostOptimizedLoadBalancingSpec configures cost-optimized AI load balancing.
+type CostOptimizedLoadBalancingSpec struct {
+	// DefaultOutputTokens is used when the request does not set max_tokens,
+	// max_completion_tokens, or max_output_tokens.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=512
+	DefaultOutputTokens int32 `json:"defaultOutputTokens,omitempty"`
+
+	// MissingPrice controls how unpriced provider/model candidates are handled.
+	// The MVP supports FailClosed, which makes unpriced candidates ineligible and
+	// rejects the request if no priced candidates remain.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=FailClosed
+	// +kubebuilder:default=FailClosed
+	MissingPrice MissingPriceBehavior `json:"missingPrice,omitempty"`
+}
+
+// MissingPriceBehavior defines how unpriced candidates are handled.
+//
+// +k8s:enum
+type MissingPriceBehavior string
+
+const (
+	// MissingPriceBehaviorFailClosed excludes unpriced candidates and fails if none remain.
+	MissingPriceBehaviorFailClosed MissingPriceBehavior = "FailClosed"
+)
 
 type IstioSpec struct {
 	// Explicitly turns Istio integration on or off for this gateway.

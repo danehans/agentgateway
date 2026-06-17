@@ -2819,6 +2819,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Cohere => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("cohere")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(
 						custom::ProviderFormat::Completions,
@@ -2834,6 +2835,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Ollama => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("ollama")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Responses, None),
@@ -2843,6 +2845,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Baseten => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("baseten")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Messages, None),
@@ -2851,6 +2854,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Cerebras => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("cerebras")),
+				cost_catalog: None,
 				formats: vec![custom_provider_format(
 					custom::ProviderFormat::Completions,
 					None,
@@ -2859,6 +2863,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Deepinfra => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("deepinfra")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(
@@ -2871,6 +2876,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Deepseek => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("deepseek")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(
@@ -2882,6 +2888,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Groq => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("groq")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Responses, None),
@@ -2890,6 +2897,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Huggingface => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("huggingface")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Responses, None),
@@ -2898,6 +2906,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Mistral => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("mistral")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Embeddings, None),
@@ -2906,6 +2915,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Openrouter => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("openrouter")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Messages, None),
@@ -2917,6 +2927,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Togetherai => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("togetherai")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Embeddings, None),
@@ -2926,6 +2937,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::XAI => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("xai")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Responses, None),
@@ -2935,6 +2947,7 @@ async fn convert_llm_config(
 			LocalModelAIProvider::Fireworks => AIProvider::Custom(custom::Provider {
 				model,
 				provider_override: Some(strng::literal!("fireworks")),
+				cost_catalog: None,
 				formats: vec![
 					custom_provider_format(custom::ProviderFormat::Completions, None),
 					custom_provider_format(custom::ProviderFormat::Messages, None),

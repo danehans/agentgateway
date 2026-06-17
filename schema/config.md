@@ -11,6 +11,15 @@
 |`config.modelCatalog`|[]object|Model cost catalog sources; entries are merged in order, with later entries taking precedence.|
 |`config.modelCatalog[].file`|string||
 |`config.modelCatalog[].inline`|string||
+|`config.aiLoadBalancing`|object|AI load-balancing profiles activated by request metadata.|
+|`config.aiLoadBalancing.profiles`|[]object||
+|`config.aiLoadBalancing.profiles[].name`|string||
+|`config.aiLoadBalancing.profiles[].trigger`|object||
+|`config.aiLoadBalancing.profiles[].trigger.model`|string||
+|`config.aiLoadBalancing.profiles[].strategy`|enum|Possible values: `P2C`, `CostOptimized`.|
+|`config.aiLoadBalancing.profiles[].cost`|object||
+|`config.aiLoadBalancing.profiles[].cost.defaultOutputTokens`|integer||
+|`config.aiLoadBalancing.profiles[].cost.missingPrice`|enum|Possible values: `FailClosed`.|
 |`config.caAddress`|string||
 |`config.caAuthToken`|string||
 |`config.xdsAddress`|string||
@@ -2380,6 +2389,9 @@
 |`binds[].listeners[].routes[].backends[].ai.provider.custom`|object||
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.model`|string||
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`binds[].listeners[].routes[].backends[].ai.provider.custom.costCatalog`|object||
+|`binds[].listeners[].routes[].backends[].ai.provider.custom.costCatalog.provider`|string||
+|`binds[].listeners[].routes[].backends[].ai.provider.custom.costCatalog.model`|string||
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.formats`|[]object||
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`binds[].listeners[].routes[].backends[].ai.provider.custom.formats[].path`|string||
@@ -3631,6 +3643,9 @@
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom`|object||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.model`|string||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.costCatalog`|object||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.costCatalog.provider`|string||
+|`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.costCatalog.model`|string||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.formats`|[]object||
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`binds[].listeners[].routes[].backends[].ai.groups[].providers[].provider.custom.formats[].path`|string||
@@ -9423,6 +9438,9 @@
 |`backends[].ai.provider.custom`|object||
 |`backends[].ai.provider.custom.model`|string||
 |`backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`backends[].ai.provider.custom.costCatalog`|object||
+|`backends[].ai.provider.custom.costCatalog.provider`|string||
+|`backends[].ai.provider.custom.costCatalog.model`|string||
 |`backends[].ai.provider.custom.formats`|[]object||
 |`backends[].ai.provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`backends[].ai.provider.custom.formats[].path`|string||
@@ -10674,6 +10692,9 @@
 |`backends[].ai.groups[].providers[].provider.custom`|object||
 |`backends[].ai.groups[].providers[].provider.custom.model`|string||
 |`backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`backends[].ai.groups[].providers[].provider.custom.costCatalog`|object||
+|`backends[].ai.groups[].providers[].provider.custom.costCatalog.provider`|string||
+|`backends[].ai.groups[].providers[].provider.custom.costCatalog.model`|string||
 |`backends[].ai.groups[].providers[].provider.custom.formats`|[]object||
 |`backends[].ai.groups[].providers[].provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`backends[].ai.groups[].providers[].provider.custom.formats[].path`|string||
@@ -15409,6 +15430,9 @@
 |`routeGroups[].routes[].backends[].ai.provider.custom`|object||
 |`routeGroups[].routes[].backends[].ai.provider.custom.model`|string||
 |`routeGroups[].routes[].backends[].ai.provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`routeGroups[].routes[].backends[].ai.provider.custom.costCatalog`|object||
+|`routeGroups[].routes[].backends[].ai.provider.custom.costCatalog.provider`|string||
+|`routeGroups[].routes[].backends[].ai.provider.custom.costCatalog.model`|string||
 |`routeGroups[].routes[].backends[].ai.provider.custom.formats`|[]object||
 |`routeGroups[].routes[].backends[].ai.provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`routeGroups[].routes[].backends[].ai.provider.custom.formats[].path`|string||
@@ -16660,6 +16684,9 @@
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom`|object||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.model`|string||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.costCatalog`|object||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.costCatalog.provider`|string||
+|`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.costCatalog.model`|string||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.formats`|[]object||
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`routeGroups[].routes[].backends[].ai.groups[].providers[].provider.custom.formats[].path`|string||
@@ -19138,6 +19165,9 @@
 |`llm.providers[].provider.custom`|object||
 |`llm.providers[].provider.custom.model`|string||
 |`llm.providers[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`llm.providers[].provider.custom.costCatalog`|object||
+|`llm.providers[].provider.custom.costCatalog.provider`|string||
+|`llm.providers[].provider.custom.costCatalog.model`|string||
 |`llm.providers[].provider.custom.formats`|[]object||
 |`llm.providers[].provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`llm.providers[].provider.custom.formats[].path`|string||
@@ -19272,6 +19302,9 @@
 |`llm.models[].provider.custom`|object||
 |`llm.models[].provider.custom.model`|string||
 |`llm.models[].provider.custom.providerOverride`|string|Provider identity for cost-catalog lookup and telemetry. Built-in named providers<br>(cohere, mistral, ...) set this so their cost resolves under the right catalog key;<br>a bare custom provider may set it to match a catalog entry. Falls back to "custom".|
+|`llm.models[].provider.custom.costCatalog`|object||
+|`llm.models[].provider.custom.costCatalog.provider`|string||
+|`llm.models[].provider.custom.costCatalog.model`|string||
 |`llm.models[].provider.custom.formats`|[]object||
 |`llm.models[].provider.custom.formats[].type`|enum|Possible values: `completions`, `messages`, `responses`, `embeddings`, `anthropicTokenCount`, `realtime`, `rerank`.|
 |`llm.models[].provider.custom.formats[].path`|string||

@@ -101,6 +101,17 @@
             "$ref": "#/$defs/ModelCatalogSource"
           }
         },
+        "aiLoadBalancing": {
+          "description": "AI load-balancing profiles activated by request metadata.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AILoadBalancingConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "caAddress": {
           "type": [
             "string",
@@ -374,6 +385,86 @@
             "inline"
           ]
         }
+      ]
+    },
+    "AILoadBalancingConfig": {
+      "type": "object",
+      "properties": {
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AILoadBalancingProfile"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AILoadBalancingProfile": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "trigger": {
+          "$ref": "#/$defs/AILoadBalancingTrigger"
+        },
+        "strategy": {
+          "$ref": "#/$defs/AILoadBalancingStrategy",
+          "default": "P2C"
+        },
+        "cost": {
+          "$ref": "#/$defs/CostOptimizedLoadBalancingConfig",
+          "default": {
+            "defaultOutputTokens": 512,
+            "missingPrice": "FailClosed"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "trigger"
+      ]
+    },
+    "AILoadBalancingTrigger": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
+      ]
+    },
+    "AILoadBalancingStrategy": {
+      "type": "string",
+      "enum": [
+        "P2C",
+        "CostOptimized"
+      ]
+    },
+    "CostOptimizedLoadBalancingConfig": {
+      "type": "object",
+      "properties": {
+        "defaultOutputTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 512
+        },
+        "missingPrice": {
+          "$ref": "#/$defs/MissingPriceBehavior",
+          "default": "FailClosed"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MissingPriceBehavior": {
+      "type": "string",
+      "enum": [
+        "FailClosed"
       ]
     },
     "RawSession": {
@@ -6659,6 +6750,16 @@
             "null"
           ]
         },
+        "costCatalog": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CostCatalogIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "formats": {
           "type": "array",
           "items": {
@@ -6670,6 +6771,24 @@
       "required": [
         "formats"
       ]
+    },
+    "CostCatalogIdentity": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "ProviderFormatConfig": {
       "type": "object",

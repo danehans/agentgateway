@@ -339,6 +339,32 @@ type CustomProvider struct {
 	// +listMapKey=type
 	// +required
 	Formats []ProviderFormatConfig `json:"formats"`
+
+	// Cost configures how this custom provider is identified in the model cost
+	// catalog. This is useful for locally hosted OSS models served through a
+	// Service, host/port, or InferencePool where the operator defines the
+	// provider/model pricing directly in the catalog.
+	// +optional
+	Cost *CustomProviderCost `json:"cost,omitempty"`
+}
+
+// CustomProviderCost configures cost tracking and load-balancing metadata for a custom provider.
+type CustomProviderCost struct {
+	// Catalog identifies the provider/model entry to use from the model cost catalog.
+	// +optional
+	Catalog *CustomProviderCostCatalog `json:"catalog,omitempty"`
+}
+
+// CustomProviderCostCatalog identifies the catalog provider/model for a custom provider.
+type CustomProviderCostCatalog struct {
+	// Provider is the catalog provider key. If unset, agentgateway uses "custom".
+	// +optional
+	Provider *ShortString `json:"provider,omitempty"`
+
+	// Model is the catalog model key. If unset, agentgateway uses the configured
+	// custom model, then the effective request model.
+	// +optional
+	Model *ShortString `json:"model,omitempty"`
 }
 
 // Provider-native LLM API format settings.

@@ -78,6 +78,15 @@ impl ModelCatalog {
 		Arc::new(Self::default())
 	}
 
+	#[cfg(test)]
+	pub(crate) fn from_json_for_test(json: &str) -> Self {
+		Self {
+			snapshot: ArcSwap::from_pointee(
+				CatalogSnapshot::parse(json).expect("test catalog must parse"),
+			),
+		}
+	}
+
 	pub fn snapshot(&self) -> Arc<CatalogSnapshot> {
 		self.snapshot.load_full()
 	}
@@ -102,6 +111,24 @@ impl ModelCatalog {
 			info.request.request_model.as_str(),
 			&info.response,
 			info.request.cache_convention,
+		)
+	}
+
+	pub fn estimate_request(
+		&self,
+		provider: &str,
+		model: &str,
+		input_tokens: u64,
+		output_tokens: u64,
+	) -> CostProjection {
+		self.snapshot.load().estimate_request(
+			provider,
+			model,
+			&Usage {
+				input: input_tokens,
+				output: output_tokens,
+				..Default::default()
+			},
 		)
 	}
 }
@@ -231,6 +258,26 @@ impl CatalogSnapshot {
 				"cost": cost,
 			}),
 		);
+		CostProjection {
+			status: CostLookupStatus::Exact,
+			cost: Some(breakdown),
+			cost_rates: Some(cost_rates),
+		}
+	}
+
+	fn estimate_request(&self, provider: &str, model: &str, usage: &Usage) -> CostProjection {
+		let Some(catalog) = self.catalog.as_ref() else {
+			return CostProjection::unpriced(CostLookupStatus::NoCatalog);
+		};
+		let Some(entry) = catalog.resolve(provider, model) else {
+			return CostProjection::unpriced(CostLookupStatus::Missing);
+		};
+		let rates = entry.effective_rates(usage.context_tokens());
+		if rates.is_empty() {
+			return CostProjection::unpriced(CostLookupStatus::Unpriced);
+		}
+		let breakdown = rates.breakdown(usage);
+		let cost_rates = CostRates::from(&rates);
 		CostProjection {
 			status: CostLookupStatus::Exact,
 			cost: Some(breakdown),

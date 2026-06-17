@@ -1469,6 +1469,7 @@ fn setup_request_custom_path_override_wins_over_format_path() {
 	let provider = AIProvider::Custom(custom::Provider {
 		model: None,
 		provider_override: None,
+		cost_catalog: None,
 		formats: vec![custom::ProviderFormatConfig {
 			format: custom::ProviderFormat::Messages,
 			path: Some(strng::literal!("/api/messages")),
@@ -1874,6 +1875,7 @@ fn custom_provider(format: custom::ProviderFormat) -> AIProvider {
 	AIProvider::Custom(custom::Provider {
 		model: None,
 		provider_override: None,
+		cost_catalog: None,
 		formats: vec![custom::ProviderFormatConfig { format, path: None }],
 	})
 }
@@ -1889,6 +1891,7 @@ fn custom_provider_override_drives_provider_name() {
 	let provider = AIProvider::Custom(custom::Provider {
 		model: None,
 		provider_override: Some(strng::literal!("cohere")),
+		cost_catalog: None,
 		formats: vec![custom::ProviderFormatConfig {
 			format: custom::ProviderFormat::Rerank,
 			path: None,
@@ -1959,4 +1962,67 @@ fn fixed_providers_classify_by_family() {
 		),
 		CacheTokenConvention::InputIncludesCache,
 	);
+}
+
+fn cost_test_backend(providers: Vec<(&'static str, &'static str)>) -> AIBackend {
+	let providers = providers
+		.into_iter()
+		.map(|(name, model)| {
+			let name = strng::new(name);
+			(
+				name.clone(),
+				NamedAIProvider {
+					name,
+					provider: AIProvider::OpenAI(openai::Provider {
+						model: Some(strng::new(model)),
+					}),
+					provider_backend: None,
+					host_override: None,
+					path_override: None,
+					path_prefix: None,
+					tokenize: false,
+					inline_policies: vec![],
+				},
+			)
+		})
+		.collect();
+	AIBackend {
+		providers: crate::types::loadbalancer::EndpointSet::new(vec![providers]),
+	}
+}
+
+#[test]
+fn cost_optimized_provider_selection_excludes_unpriced_candidates() {
+	let backend = cost_test_backend(vec![
+		("cheap-provider", "cheap"),
+		("missing-provider", "missing"),
+	]);
+	let catalog = cost::ModelCatalog::from_json_for_test(
+		r#"{"providers":{"openai":{"models":{"cheap":{"rates":{"input":"0.1","output":"0.2"}}}}}}"#,
+	);
+
+	let selected = backend
+		.select_cost_optimized_provider("auto", 100, 100, &catalog)
+		.expect("selection should not fail")
+		.expect("priced candidate should be selected");
+
+	assert_eq!(selected.provider.name.as_str(), "cheap-provider");
+	assert_eq!(selected.model.as_str(), "cheap");
+}
+
+#[test]
+fn cost_optimized_provider_selection_fails_when_no_candidates_are_priced() {
+	let backend = cost_test_backend(vec![("missing-provider", "missing")]);
+	let catalog = cost::ModelCatalog::from_json_for_test(
+		r#"{"providers":{"openai":{"models":{"cheap":{"rates":{"input":"0.1","output":"0.2"}}}}}}"#,
+	);
+
+	let err = backend
+		.select_cost_optimized_provider("auto", 100, 100, &catalog)
+		.expect_err("missing price should fail closed");
+
+	assert!(matches!(
+		err,
+		CostOptimizedSelectionError::NoPricedCandidates
+	));
 }

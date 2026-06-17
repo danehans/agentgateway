@@ -724,6 +724,9 @@ impl RequestLog {
 			route_name: None,
 			backend_info: None,
 			backend_protocol: None,
+			ai_load_balancing_profile: None,
+			ai_selected_provider: None,
+			ai_selected_model: None,
 			host: None,
 			method: None,
 			path: None,
@@ -867,6 +870,9 @@ pub struct RequestLog {
 	pub route_name: Option<RouteName>,
 	pub backend_info: Option<BackendInfo>,
 	pub backend_protocol: Option<cel::BackendProtocol>,
+	pub ai_load_balancing_profile: Option<Strng>,
+	pub ai_selected_provider: Option<Strng>,
+	pub ai_selected_model: Option<Strng>,
 
 	pub host: Option<String>,
 	pub method: Option<::http::Method>,
@@ -1189,6 +1195,12 @@ impl Drop for DropOnLog {
 				("span.id", span_id.display()),
 				("jwt.sub", log.jwt_sub.display()),
 				("protocol", log.backend_protocol.as_ref().map(debug)),
+				(
+					"ai.load_balancing.profile",
+					log.ai_load_balancing_profile.display(),
+				),
+				("ai.selected.provider", log.ai_selected_provider.display()),
+				("ai.selected.model", log.ai_selected_model.display()),
 				("a2a.method", log.a2a_method.display()),
 				(
 					"mcp.method.name",

@@ -286,6 +286,32 @@ spec:
                                     - message: Must have port for Service reference
                                       rule: '(size(self.group) == 0 && self.kind ==
                                         ''Service'') ? has(self.port) : true'
+                                  cost:
+                                    description: |-
+                                      Cost configures how this custom provider is identified in the model cost
+                                      catalog. This is useful for locally hosted OSS models served through a
+                                      Service, host/port, or InferencePool where the operator defines the
+                                      provider/model pricing directly in the catalog.
+                                    properties:
+                                      catalog:
+                                        description: Catalog identifies the provider/model
+                                          entry to use from the model cost catalog.
+                                        properties:
+                                          model:
+                                            description: |-
+                                              Model is the catalog model key. If unset, agentgateway uses the configured
+                                              custom model, then the effective request model.
+                                            maxLength: 256
+                                            minLength: 1
+                                            type: string
+                                          provider:
+                                            description: Provider is the catalog provider
+                                              key. If unset, agentgateway uses "custom".
+                                            maxLength: 256
+                                            minLength: 1
+                                            type: string
+                                        type: object
+                                    type: object
                                   formats:
                                     description: Provider-native API formats this
                                       provider supports.
@@ -6095,6 +6121,32 @@ spec:
                             - message: Must have port for Service reference
                               rule: '(size(self.group) == 0 && self.kind == ''Service'')
                                 ? has(self.port) : true'
+                          cost:
+                            description: |-
+                              Cost configures how this custom provider is identified in the model cost
+                              catalog. This is useful for locally hosted OSS models served through a
+                              Service, host/port, or InferencePool where the operator defines the
+                              provider/model pricing directly in the catalog.
+                            properties:
+                              catalog:
+                                description: Catalog identifies the provider/model
+                                  entry to use from the model cost catalog.
+                                properties:
+                                  model:
+                                    description: |-
+                                      Model is the catalog model key. If unset, agentgateway uses the configured
+                                      custom model, then the effective request model.
+                                    maxLength: 256
+                                    minLength: 1
+                                    type: string
+                                  provider:
+                                    description: Provider is the catalog provider
+                                      key. If unset, agentgateway uses "custom".
+                                    maxLength: 256
+                                    minLength: 1
+                                    type: string
+                                type: object
+                            type: object
                           formats:
                             description: Provider-native API formats this provider
                               supports.

@@ -55,6 +55,81 @@ spec:
           spec:
             description: Desired data plane provisioning settings.
             properties:
+              aiLoadBalancing:
+                description: |-
+                  Gateway-scoped AI load-balancing profiles. Profiles are selected by request
+                  metadata, such as the requested model. When no profile trigger matches, AI
+                  backends continue to use the default P2C load-balancing behavior.
+                properties:
+                  profiles:
+                    description: |-
+                      Profiles defines load-balancing behavior that can be activated by request
+                      metadata. The first profile whose trigger matches the request is used.
+                    items:
+                      description: AILoadBalancingProfile defines an AI load-balancing
+                        strategy and when it applies.
+                      properties:
+                        cost:
+                          description: Cost configures the CostOptimized strategy.
+                          properties:
+                            defaultOutputTokens:
+                              default: 512
+                              description: |-
+                                DefaultOutputTokens is used when the request does not set max_tokens,
+                                max_completion_tokens, or max_output_tokens.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            missingPrice:
+                              default: FailClosed
+                              description: |-
+                                MissingPrice controls how unpriced provider/model candidates are handled.
+                                The MVP supports FailClosed, which makes unpriced candidates ineligible and
+                                rejects the request if no priced candidates remain.
+                              enum:
+                              - FailClosed
+                              type: string
+                          type: object
+                        name:
+                          description: Name identifies this profile.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        strategy:
+                          default: P2C
+                          description: |-
+                            Strategy selects the load-balancing behavior to apply when the trigger
+                            matches. P2C preserves the existing behavior. CostOptimized filters out
+                            unpriced candidates, estimates request cost from the configured model
+                            catalog, and then uses P2C among the lowest-cost candidates.
+                          enum:
+                          - CostOptimized
+                          - P2C
+                          type: string
+                        trigger:
+                          description: Trigger defines the request metadata that activates
+                            this profile.
+                          properties:
+                            model:
+                              allOf:
+                              - minLength: 1
+                              - minLength: 1
+                              description: Model matches the effective requested model,
+                                for example "auto".
+                              maxLength: 256
+                              type: string
+                          required:
+                          - model
+                          type: object
+                      required:
+                      - name
+                      - trigger
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                type: object
               deployment:
                 description: |-
                   Overrides for the generated
