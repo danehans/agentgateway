@@ -120,10 +120,10 @@ type AILoadBalancingProfile struct {
 
 type AILoadBalancingTrigger struct {
     // Model name that activates this profile, for example "auto".
-    // The intended steady state is the effective model after existing request
-    // transformations, content routing, and model aliasing have produced trusted
-    // routing state. The initial MVP implementation matches the OpenAI-compatible
-    // request body model before provider-level model aliasing.
+    // The model is matched against trusted pre-provider routing state, after
+    // route/backend model aliasing that is known before AI provider selection.
+    // Provider-specific aliases are applied after provider selection and do
+    // not activate this trigger.
     //
     // +required
     Model ShortString `json:"model"`
@@ -244,10 +244,10 @@ Cost-optimized routing only operates over explicit candidates. A profile is acti
 effective model for the request, such as `auto`. This does not prevent existing agentgateway routing features from
 deriving or rewriting the effective model before AI load balancing runs.
 
-The implementation should converge on matching trusted effective model state. The initial MVP has a narrower trigger
-boundary: for OpenAI-compatible chat completions and Responses requests, it matches the `model` field in the request body
-before provider-level model aliasing. This is acceptable for `model: auto` traffic and keeps the first implementation
-small, but content-routing/model-alias integration is follow-up work.
+For the MVP, the effective model used by AI load balancing is the requested OpenAI-compatible body `model` after applying
+route/backend LLM model aliases available before provider selection. Provider-specific aliases and inline provider
+policies are intentionally not used to activate a profile because they depend on the provider choice the scheduler is
+about to make.
 
 The MVP candidate set is the providers configured for the selected `AgentgatewayBackend` priority group, including the
 provider model configured on each provider. Existing virtual model or alias configuration may also contribute explicit
@@ -424,8 +424,9 @@ MVP, P2C remains the only final selection algorithm. The `P2C` strategy is today
 while `CostOptimized` adds cost filtering and a cost-aware comparator before using the same P2C final selection.
 
 Profile triggers are evaluated against trusted request state computed by agentgateway, not raw client-supplied routing
-headers. A client can request `model: auto`, or an existing transformation/content-routing rule can derive `auto` as the
-effective model. agentgateway should own or overwrite any internal metadata used for the trigger before scheduling.
+headers. A client can request `model: auto`, or route/backend LLM model aliases can derive `auto` as the effective model
+before AI provider selection. agentgateway should own or overwrite any internal metadata used for the trigger before
+scheduling.
 
 The runtime should keep the strategy implementation extensible. `CostOptimized` can be implemented as the first
 non-default scheduling strategy, internally composed from candidate filtering, cost scoring, and P2C selection. Future
@@ -560,9 +561,9 @@ Operators opt in by:
 - **No arbitrary semantic substitution.** This avoids surprising callers who requested a specific model.
 - **Trigger metadata must be trusted.** agentgateway should derive or overwrite internal trigger metadata before
   scheduling. Raw client-supplied headers are classification hints, not a security or spend-control boundary.
-- **Effective-model trigger matching is phased.** The initial implementation matches the OpenAI-compatible request body
-  `model` field. Matching the post-transformation/content-routing/model-alias effective model should be added before
-  treating `trigger.model` as a general trusted routing signal.
+- **Provider-specific aliases do not activate profiles.** The scheduler uses route/backend effective model state that is
+  available before provider selection. Provider inline policies run after a provider is selected and are not part of the
+  trigger boundary.
 
 ## Test Plan
 
@@ -573,6 +574,7 @@ Operators opt in by:
 - Controller translation includes trigger and strategy config when configured.
 - Runtime uses existing P2C when the effective model does not match a trigger.
 - Runtime uses the matched profile when the effective model matches `auto`.
+- Runtime applies route/backend model aliases before matching `trigger.model`.
 - Runtime rejects candidates that would forward `auto` upstream without resolving to a concrete provider model.
 - Runtime excludes candidates that cannot serve the scheduled OpenAI-compatible route, including `/v1/responses`
   candidates without Responses support.
@@ -588,8 +590,6 @@ Operators opt in by:
 - Health/unhealthy candidate behavior remains respected; a degraded cheaper candidate must not beat a healthier candidate
   solely because it has lower estimated cost.
 - Access logs/traces include effective model, matched trigger, selected provider+model, and strategy metadata.
-- Add a deferred or ignored regression test for post-alias effective-model trigger matching until the proxy has trusted
-  effective model state available at the scheduling phase.
 - Existing AI P2C and virtual model routing tests continue to pass.
 
 ## Open Questions
