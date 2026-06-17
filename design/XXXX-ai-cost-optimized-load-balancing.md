@@ -291,8 +291,8 @@ Cost-optimized routing requires each custom candidate, regardless of target type
   requested model.
 - The selected provider's `formats` still determine which request shapes the custom provider can serve.
 - If a custom candidate has no matching provider+model catalog entry, that candidate is ineligible.
-- If all candidates in the current priority group are unpriced or unavailable, routing falls through to the next
-  priority group. If no group has eligible candidates, the request fails closed.
+- Priority groups are evaluated in order. Cost-optimized routing selects from the first priority group that has at
+  least one eligible, priced candidate. If no priority group has an eligible priced candidate, the request fails closed.
 
 Example catalog keys:
 
@@ -407,9 +407,9 @@ enum AILoadBalancingStrategy {
 }
 ```
 
-`AILoadBalancingStrategy` controls how candidates are filtered and scored, not the final selection algorithm. In the MVP,
-P2C remains the only final selection algorithm. The `P2C` strategy is today's health/load scoring behavior, while
-`CostOptimized` adds cost filtering and cost-aware scoring before using the same P2C final selection.
+`AILoadBalancingStrategy` controls how candidates are filtered and compared, not the final selection algorithm. In the
+MVP, P2C remains the only final selection algorithm. The `P2C` strategy is today's health/load comparison behavior,
+while `CostOptimized` adds cost filtering and a cost-aware comparator before using the same P2C final selection.
 
 Profile triggers are evaluated against trusted request state computed by agentgateway, not raw client-supplied routing
 headers. A client can request `model: auto`, or an existing transformation/content-routing rule can derive `auto` as the
@@ -428,15 +428,19 @@ For `CostOptimized`:
 3. Build candidates that resolve to concrete provider models. A candidate that would forward `auto` upstream is
    ineligible.
 4. Look up each candidate's provider+model rates in the model catalog.
-5. Exclude unpriced candidates.
-6. If no priced candidates remain, reject the request.
-7. Score remaining candidates by estimated cost.
-8. Use agentgateway's existing P2C selection behavior with the cost-aware score.
+5. Exclude unpriced candidates when `missingPrice: FailClosed`.
+6. Evaluate priority groups in order and select from the first group with at least one eligible priced candidate.
+7. If no priority group has an eligible priced candidate, reject the request.
+8. Use P2C within the selected priority group. P2C samples two candidates, then compares them lexicographically:
+   1. existing availability/health eligibility and health state;
+   2. priced eligibility, which is a hard filter for the MVP;
+   3. lower estimated request cost;
+   4. existing P2C health/load/latency/pending-request comparison as the tie-breaker.
 9. Rewrite the upstream request model to the selected provider model.
 
-Cost scoring should remain health-aware. A cheaper unhealthy provider must not beat a healthy priced provider solely on
-cost. When two sampled candidates have the same estimated cost, selection should fall back to the existing health,
-latency, and pending-request score.
+This comparator is intentionally not a multiplicative score such as `health_score * cost_score`. Cost must not let a
+cheaper unhealthy or unavailable provider beat a healthier priced provider. When two sampled candidates have the same
+estimated cost, the decision is identical to today's P2C comparison for those candidates.
 
 ## Cost Data
 
