@@ -91,9 +91,7 @@ impl AIBackend {
 
 	pub fn select_cost_optimized_provider(
 		&self,
-		request_model: &str,
-		input_tokens: u64,
-		output_tokens: u64,
+		request: &ModelSchedulingRequest,
 		model_catalog: &cost::ModelCatalog,
 	) -> Result<Option<AIProviderSelection>, CostOptimizedSelectionError> {
 		let mut saw_active_candidate = false;
@@ -101,15 +99,24 @@ impl AIBackend {
 			let mut candidates = Vec::new();
 			for (provider, info) in group.active() {
 				saw_active_candidate = true;
-				let Some(model) = provider.provider.cost_catalog_model(request_model) else {
+				if !provider
+					.provider
+					.supports_scheduled_openai_route(request.route_type, request.input_format)
+				{
+					continue;
+				}
+				let Some(model) = provider
+					.provider
+					.cost_catalog_model(request.effective_model.as_str())
+				else {
 					continue;
 				};
 				let catalog_provider = provider.provider.cost_catalog_provider();
 				let projection = model_catalog.estimate_request(
 					catalog_provider.as_str(),
 					model.as_str(),
-					input_tokens,
-					output_tokens,
+					request.estimated_input_tokens,
+					request.estimated_output_tokens,
 				);
 				let Some(cost) = projection.cost.as_ref().map(|cost| cost.total()) else {
 					continue;
@@ -152,11 +159,18 @@ fn select_lowest_cost_p2c(
 	[a, b]
 		.into_iter()
 		.map(|idx| candidates[idx].clone())
-		.min_by(|a, b| {
-			a.cost
-				.cmp(&b.cost)
-				.then_with(|| b.info.score().total_cmp(&a.info.score()))
-		})
+		.min_by(compare_cost_optimized_candidates)
+}
+
+fn compare_cost_optimized_candidates(
+	a: &CostOptimizedCandidate,
+	b: &CostOptimizedCandidate,
+) -> std::cmp::Ordering {
+	b.info
+		.health_score()
+		.total_cmp(&a.info.health_score())
+		.then_with(|| a.cost.cmp(&b.cost))
+		.then_with(|| b.info.score().total_cmp(&a.info.score()))
 }
 
 #[derive(Debug)]
@@ -178,6 +192,16 @@ struct CostOptimizedCandidate {
 	info: Arc<EndpointInfo>,
 	model: Strng,
 	cost: Decimal,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelSchedulingRequest {
+	pub requested_model: Strng,
+	pub effective_model: Strng,
+	pub route_type: RouteType,
+	pub input_format: InputFormat,
+	pub estimated_input_tokens: u64,
+	pub estimated_output_tokens: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -497,6 +521,39 @@ impl AIProvider {
 			_ => self
 				.override_model()
 				.or_else(|| concrete_request_model(request_model)),
+		}
+	}
+	pub fn supports_scheduled_openai_route(
+		&self,
+		route_type: RouteType,
+		input_format: InputFormat,
+	) -> bool {
+		if !matches!(
+			(route_type, input_format),
+			(RouteType::Completions, InputFormat::Completions)
+				| (RouteType::Responses, InputFormat::Responses)
+		) {
+			return false;
+		}
+		match (self, input_format) {
+			(AIProvider::Custom(p), InputFormat::Completions) => {
+				p.supports(custom::ProviderFormat::Completions)
+			},
+			(AIProvider::Custom(p), InputFormat::Responses) => {
+				p.supports(custom::ProviderFormat::Responses)
+			},
+			(
+				AIProvider::OpenAI(_) | AIProvider::Copilot(_) | AIProvider::Azure(_),
+				InputFormat::Completions | InputFormat::Responses,
+			) => true,
+			(
+				AIProvider::Anthropic(_)
+				| AIProvider::Bedrock(_)
+				| AIProvider::Gemini(_)
+				| AIProvider::Vertex(_),
+				InputFormat::Completions,
+			) => true,
+			_ => false,
 		}
 	}
 	/// Default backend policies (TLS + auth) for connecting to the provider. Split from

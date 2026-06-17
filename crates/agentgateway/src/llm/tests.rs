@@ -1964,31 +1964,120 @@ fn fixed_providers_classify_by_family() {
 	);
 }
 
+fn named_openai_provider(name: &'static str, model: &'static str) -> (Strng, NamedAIProvider) {
+	let name = strng::new(name);
+	(
+		name.clone(),
+		NamedAIProvider {
+			name,
+			provider: AIProvider::OpenAI(openai::Provider {
+				model: Some(strng::new(model)),
+			}),
+			provider_backend: None,
+			host_override: None,
+			path_override: None,
+			path_prefix: None,
+			tokenize: false,
+			inline_policies: vec![],
+		},
+	)
+}
+
+fn named_anthropic_provider(name: &'static str, model: &'static str) -> (Strng, NamedAIProvider) {
+	let name = strng::new(name);
+	(
+		name.clone(),
+		NamedAIProvider {
+			name,
+			provider: AIProvider::Anthropic(anthropic::Provider {
+				model: Some(strng::new(model)),
+			}),
+			provider_backend: None,
+			host_override: None,
+			path_override: None,
+			path_prefix: None,
+			tokenize: false,
+			inline_policies: vec![],
+		},
+	)
+}
+
+fn named_custom_provider(
+	name: &'static str,
+	model: &'static str,
+	formats: Vec<custom::ProviderFormat>,
+) -> (Strng, NamedAIProvider) {
+	let name = strng::new(name);
+	(
+		name.clone(),
+		NamedAIProvider {
+			name,
+			provider: AIProvider::Custom(custom::Provider {
+				model: Some(strng::new(model)),
+				provider_override: None,
+				cost_catalog: None,
+				formats: formats
+					.into_iter()
+					.map(|format| custom::ProviderFormatConfig { format, path: None })
+					.collect(),
+			}),
+			provider_backend: None,
+			host_override: None,
+			path_override: None,
+			path_prefix: None,
+			tokenize: false,
+			inline_policies: vec![],
+		},
+	)
+}
+
 fn cost_test_backend(providers: Vec<(&'static str, &'static str)>) -> AIBackend {
 	let providers = providers
 		.into_iter()
-		.map(|(name, model)| {
-			let name = strng::new(name);
-			(
-				name.clone(),
-				NamedAIProvider {
-					name,
-					provider: AIProvider::OpenAI(openai::Provider {
-						model: Some(strng::new(model)),
-					}),
-					provider_backend: None,
-					host_override: None,
-					path_override: None,
-					path_prefix: None,
-					tokenize: false,
-					inline_policies: vec![],
-				},
-			)
-		})
+		.map(|(name, model)| named_openai_provider(name, model))
 		.collect();
 	AIBackend {
 		providers: crate::types::loadbalancer::EndpointSet::new(vec![providers]),
 	}
+}
+
+fn cost_test_backend_groups(groups: Vec<Vec<(Strng, NamedAIProvider)>>) -> AIBackend {
+	AIBackend {
+		providers: crate::types::loadbalancer::EndpointSet::new(groups),
+	}
+}
+
+fn cost_request(route_type: RouteType, input_format: InputFormat) -> ModelSchedulingRequest {
+	ModelSchedulingRequest {
+		requested_model: "auto".into(),
+		effective_model: "auto".into(),
+		route_type,
+		input_format,
+		estimated_input_tokens: 100,
+		estimated_output_tokens: 100,
+	}
+}
+
+fn cost_request_completions() -> ModelSchedulingRequest {
+	cost_request(RouteType::Completions, InputFormat::Completions)
+}
+
+fn cost_request_responses() -> ModelSchedulingRequest {
+	cost_request(RouteType::Responses, InputFormat::Responses)
+}
+
+fn provider_and_info(
+	backend: &AIBackend,
+	provider_name: &str,
+) -> (Arc<NamedAIProvider>, Arc<EndpointInfo>) {
+	for group in backend.providers.priority_iter() {
+		for (provider, info) in group.active() {
+			if provider.name.as_str() == provider_name {
+				return (provider.clone(), info.clone());
+			}
+		}
+	}
+	panic!("provider {provider_name} not found")
 }
 
 #[test]
@@ -2002,7 +2091,7 @@ fn cost_optimized_provider_selection_excludes_unpriced_candidates() {
 	);
 
 	let selected = backend
-		.select_cost_optimized_provider("auto", 100, 100, &catalog)
+		.select_cost_optimized_provider(&cost_request_completions(), &catalog)
 		.expect("selection should not fail")
 		.expect("priced candidate should be selected");
 
@@ -2018,11 +2107,144 @@ fn cost_optimized_provider_selection_fails_when_no_candidates_are_priced() {
 	);
 
 	let err = backend
-		.select_cost_optimized_provider("auto", 100, 100, &catalog)
+		.select_cost_optimized_provider(&cost_request_completions(), &catalog)
 		.expect_err("missing price should fail closed");
 
 	assert!(matches!(
 		err,
 		CostOptimizedSelectionError::NoPricedCandidates
 	));
+}
+
+#[test]
+fn cost_optimized_provider_selection_falls_through_to_next_priced_priority_group() {
+	let backend = cost_test_backend_groups(vec![
+		vec![named_openai_provider("missing-provider", "missing")],
+		vec![named_openai_provider("priced-provider", "priced")],
+	]);
+	let catalog = cost::ModelCatalog::from_json_for_test(
+		r#"{"providers":{"openai":{"models":{"priced":{"rates":{"input":"0.1","output":"0.2"}}}}}}"#,
+	);
+
+	let selected = backend
+		.select_cost_optimized_provider(&cost_request_completions(), &catalog)
+		.expect("selection should not fail")
+		.expect("second priority group has a priced candidate");
+
+	assert_eq!(selected.provider.name.as_str(), "priced-provider");
+}
+
+#[test]
+fn cost_optimized_responses_route_excludes_managed_providers_without_responses_support() {
+	let backend = cost_test_backend_groups(vec![vec![
+		named_anthropic_provider("cheap-anthropic", "claude-cheap"),
+		named_openai_provider("expensive-openai", "gpt-expensive"),
+	]]);
+	let catalog = cost::ModelCatalog::from_json_for_test(
+		r#"{"providers":{
+			"anthropic":{"models":{"claude-cheap":{"rates":{"input":"0.000001","output":"0.000001"}}}},
+			"openai":{"models":{"gpt-expensive":{"rates":{"input":"1","output":"1"}}}}
+		}}"#,
+	);
+
+	let selected = backend
+		.select_cost_optimized_provider(&cost_request_responses(), &catalog)
+		.expect("selection should not fail")
+		.expect("OpenAI responses candidate should be selected");
+
+	assert_eq!(selected.provider.name.as_str(), "expensive-openai");
+}
+
+#[test]
+fn cost_optimized_custom_provider_requires_compatible_native_format() {
+	let backend = cost_test_backend_groups(vec![vec![
+		named_custom_provider(
+			"cheap-completions-only",
+			"cheap",
+			vec![custom::ProviderFormat::Completions],
+		),
+		named_custom_provider(
+			"expensive-responses",
+			"expensive",
+			vec![custom::ProviderFormat::Responses],
+		),
+	]]);
+	let catalog = cost::ModelCatalog::from_json_for_test(
+		r#"{"providers":{"custom":{"models":{
+			"cheap":{"rates":{"input":"0.000001","output":"0.000001"}},
+			"expensive":{"rates":{"input":"1","output":"1"}}
+		}}}}"#,
+	);
+
+	let selected = backend
+		.select_cost_optimized_provider(&cost_request_responses(), &catalog)
+		.expect("selection should not fail")
+		.expect("Responses-capable custom candidate should be selected");
+
+	assert_eq!(selected.provider.name.as_str(), "expensive-responses");
+}
+
+#[test]
+fn cost_optimized_health_state_is_compared_before_cost() {
+	let backend = cost_test_backend(vec![
+		("cheap-degraded", "cheap"),
+		("expensive-healthy", "expensive"),
+	]);
+	let (cheap_provider, cheap_info) = provider_and_info(&backend, "cheap-degraded");
+	let (expensive_provider, expensive_info) = provider_and_info(&backend, "expensive-healthy");
+
+	backend
+		.providers
+		.start_request("cheap-degraded".into(), &cheap_info)
+		.finish_request(false, std::time::Duration::from_millis(1), None, None);
+
+	let cheap = CostOptimizedCandidate {
+		provider: cheap_provider,
+		info: cheap_info,
+		model: "cheap".into(),
+		cost: Decimal::new(1, 6),
+	};
+	let expensive = CostOptimizedCandidate {
+		provider: expensive_provider,
+		info: expensive_info,
+		model: "expensive".into(),
+		cost: Decimal::new(1, 0),
+	};
+
+	assert_eq!(
+		compare_cost_optimized_candidates(&cheap, &expensive),
+		std::cmp::Ordering::Greater,
+		"degraded health should take precedence over lower cost in the comparator"
+	);
+}
+
+#[test]
+fn cost_optimized_selection_uses_effective_model_for_catalog_lookup() {
+	let name = strng::literal!("no-override-provider");
+	let backend = cost_test_backend_groups(vec![vec![(
+		name.clone(),
+		NamedAIProvider {
+			name,
+			provider: AIProvider::OpenAI(openai::Provider { model: None }),
+			provider_backend: None,
+			host_override: None,
+			path_override: None,
+			path_prefix: None,
+			tokenize: false,
+			inline_policies: vec![],
+		},
+	)]]);
+	let catalog = cost::ModelCatalog::from_json_for_test(
+		r#"{"providers":{"openai":{"models":{"alias-model":{"rates":{"input":"0.1","output":"0.2"}}}}}}"#,
+	);
+	let mut request = cost_request_completions();
+	request.requested_model = "auto".into();
+	request.effective_model = "alias-model".into();
+
+	let selected = backend
+		.select_cost_optimized_provider(&request, &catalog)
+		.expect("selection should not fail")
+		.expect("effective model should be used for catalog lookup");
+
+	assert_eq!(selected.model.as_str(), "alias-model");
 }

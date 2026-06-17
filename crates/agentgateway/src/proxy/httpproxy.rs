@@ -76,9 +76,9 @@ async fn maybe_select_ai_load_balanced_provider(
 	{
 		return Ok(None);
 	}
-	if !is_cost_routable_openai_path(req.uri().path()) {
+	let Some((route_type, input_format)) = cost_routable_openai_route(req.uri().path()) else {
 		return Ok(None);
-	}
+	};
 
 	let bytes = read_and_restore_request_body(req).await?;
 	let mut json: Value = match serde_json::from_slice(bytes.as_ref()) {
@@ -101,16 +101,18 @@ async fn maybe_select_ai_load_balanced_provider(
 		return Ok(None);
 	}
 
-	let input_tokens = estimate_openai_request_input_tokens(&json, bytes.len());
-	let output_tokens =
-		estimate_openai_request_output_tokens(&json).unwrap_or(profile.cost.default_output_tokens());
+	let scheduling_request = llm::ModelSchedulingRequest {
+		requested_model: strng::new(&request_model),
+		// MVP limitation: the proxy has not yet run provider-level model aliasing here.
+		effective_model: strng::new(&request_model),
+		route_type,
+		input_format,
+		estimated_input_tokens: estimate_openai_request_input_tokens(&json, bytes.len()),
+		estimated_output_tokens: estimate_openai_request_output_tokens(&json)
+			.unwrap_or(profile.cost.default_output_tokens()),
+	};
 	let selection = ai
-		.select_cost_optimized_provider(
-			request_model.as_str(),
-			input_tokens,
-			output_tokens,
-			inputs.model_catalog.as_ref(),
-		)
+		.select_cost_optimized_provider(&scheduling_request, inputs.model_catalog.as_ref())
 		.map_err(|err| ProxyError::ProcessingString(err.to_string()))?
 		.ok_or(ProxyError::NoHealthyEndpoints)?;
 
@@ -121,8 +123,14 @@ async fn maybe_select_ai_load_balanced_provider(
 	}))
 }
 
-fn is_cost_routable_openai_path(path: &str) -> bool {
-	path.ends_with("/chat/completions") || path.ends_with("/responses")
+fn cost_routable_openai_route(path: &str) -> Option<(RouteType, InputFormat)> {
+	if path.ends_with("/chat/completions") {
+		return Some((RouteType::Completions, InputFormat::Completions));
+	}
+	if path.ends_with("/responses") {
+		return Some((RouteType::Responses, InputFormat::Responses));
+	}
+	None
 }
 
 async fn read_and_restore_request_body(req: &mut Request) -> Result<bytes::Bytes, ProxyError> {
@@ -3048,6 +3056,7 @@ mod tests {
 	};
 	use crate::http;
 	use crate::http::filters::AutoHostname;
+	use crate::llm::{InputFormat, RouteType};
 	use crate::test_helpers::proxymock;
 	use crate::types::agent::{Backend, ResourceName, Target};
 	use crate::types::discovery::{AppProtocol, Endpoint, HealthStatus, Service};
@@ -3065,6 +3074,27 @@ mod tests {
 			condition: condition
 				.map(|e| std::sync::Arc::new(crate::cel::Expression::new_strict(e).unwrap())),
 		}
+	}
+
+	#[test]
+	fn cost_routable_openai_route_is_limited_to_chat_and_responses() {
+		assert_eq!(
+			super::cost_routable_openai_route("/v1/chat/completions"),
+			Some((RouteType::Completions, InputFormat::Completions))
+		);
+		assert_eq!(
+			super::cost_routable_openai_route("/proxy/v1/responses"),
+			Some((RouteType::Responses, InputFormat::Responses))
+		);
+		assert_eq!(super::cost_routable_openai_route("/v1/messages"), None);
+		assert_eq!(super::cost_routable_openai_route("/v1/embeddings"), None);
+		assert_eq!(super::cost_routable_openai_route("/v1/rerank"), None);
+	}
+
+	#[test]
+	#[ignore = "deferred: cost-optimized trigger matching currently uses the raw OpenAI request model before alias/content-routing effective model state is available"]
+	fn cost_optimized_trigger_uses_effective_model_after_aliasing() {
+		panic!("wire cost-optimized trigger matching to trusted effective model state");
 	}
 
 	#[test]
