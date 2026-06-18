@@ -346,6 +346,259 @@ llm:
 }
 
 #[tokio::test]
+async fn test_llm_semantic_virtual_model_config() {
+	let normalized = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: text-embedding-3-small
+    visibility: internal
+    provider: openAI
+  - name: general
+    visibility: internal
+    provider: openAI
+  - name: coding
+    visibility: internal
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          description: Coding help
+          phrases:
+          - Write a Python function
+          scoreThreshold: 0.6
+          minInputTokens: 1
+          maxInputTokens: 4096
+"#,
+	)
+	.await
+	.expect("semantic virtual model should normalize");
+
+	let routes = &normalized.listener_routes[0].1;
+	let llm_route = routes
+		.iter()
+		.find(|route| route.key == "llm:request")
+		.expect("expected single LLM request route");
+	assert!(
+		llm_route.llm_router.is_some(),
+		"LLM request route should carry the native model router"
+	);
+}
+
+#[tokio::test]
+async fn test_llm_semantic_virtual_model_rejects_unsupported_embedding_model() {
+	let err = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: claude-3-haiku
+    provider: anthropic
+  - name: general
+    provider: openAI
+  - name: coding
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: claude-3-haiku
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases:
+          - Write a Python function
+"#,
+	)
+	.await
+	.expect_err("semantic embedding model must support embeddings");
+	assert!(
+		err.to_string().contains(
+			"virtual model smart semantic embeddingModel claude-3-haiku does not support embeddings"
+		),
+		"{err:?}"
+	);
+}
+
+#[tokio::test]
+async fn test_llm_semantic_virtual_model_requires_phrases() {
+	let err = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: text-embedding-3-small
+    provider: openAI
+  - name: general
+    provider: openAI
+  - name: coding
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases: []
+"#,
+	)
+	.await
+	.expect_err("semantic target must provide phrases");
+	assert!(
+		err
+			.to_string()
+			.contains("virtual model smart semantic target coding must specify at least one phrase"),
+		"{err:?}"
+	);
+}
+
+#[tokio::test]
+async fn test_llm_semantic_virtual_model_rejects_invalid_threshold() {
+	let err = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: text-embedding-3-small
+    provider: openAI
+  - name: general
+    provider: openAI
+  - name: coding
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases:
+          - Write a Python function
+          scoreThreshold: 1.2
+"#,
+	)
+	.await
+	.expect_err("semantic threshold must be between 0 and 1");
+	assert!(
+		err.to_string().contains(
+			"virtual model smart semantic target coding scoreThreshold must be between 0 and 1"
+		),
+		"{err:?}"
+	);
+}
+
+#[tokio::test]
+async fn test_llm_semantic_virtual_model_rejects_invalid_min_input_tokens() {
+	let err = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: text-embedding-3-small
+    provider: openAI
+  - name: general
+    provider: openAI
+  - name: coding
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases:
+          - Write a Python function
+          minInputTokens: 0
+"#,
+	)
+	.await
+	.expect_err("semantic minInputTokens must be greater than 0");
+	assert!(
+		err
+			.to_string()
+			.contains("virtual model smart semantic target coding minInputTokens must be greater than 0"),
+		"{err:?}"
+	);
+}
+
+#[tokio::test]
+async fn test_llm_semantic_virtual_model_rejects_invalid_max_input_tokens() {
+	let err = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: text-embedding-3-small
+    provider: openAI
+  - name: general
+    provider: openAI
+  - name: coding
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases:
+          - Write a Python function
+          maxInputTokens: 0
+"#,
+	)
+	.await
+	.expect_err("semantic maxInputTokens must be greater than 0");
+	assert!(
+		err
+			.to_string()
+			.contains("virtual model smart semantic target coding maxInputTokens must be greater than 0"),
+		"{err:?}"
+	);
+}
+
+#[tokio::test]
+async fn test_llm_semantic_virtual_model_rejects_min_above_max_input_tokens() {
+	let err = normalize_test_config(
+		r#"
+llm:
+  models:
+  - name: text-embedding-3-small
+    provider: openAI
+  - name: general
+    provider: openAI
+  - name: coding
+    provider: openAI
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases:
+          - Write a Python function
+          minInputTokens: 100
+          maxInputTokens: 10
+"#,
+	)
+	.await
+	.expect_err("semantic minInputTokens must be less than or equal to maxInputTokens");
+	assert!(
+		err.to_string().contains(
+			"virtual model smart semantic target coding minInputTokens must be less than or equal to maxInputTokens"
+		),
+		"{err:?}"
+	);
+}
+
+#[tokio::test]
 async fn test_llm_model_rejects_multiple_wildcards() {
 	let err = normalize_test_config(
 		r#"

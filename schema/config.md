@@ -20239,6 +20239,16 @@
 |`llm.virtualModels[].routing.conditional.targets`|[]object|targets are evaluated in order. The first matching condition selects the model.|
 |`llm.virtualModels[].routing.conditional.targets[].when`|string|when must evaluate to true for this target to be selected. Omit only on the final fallback target.|
 |`llm.virtualModels[].routing.conditional.targets[].model`|string|model is resolved against llm.models using the same wildcard matching as client requests.|
+|`llm.virtualModels[].routing.semantic`|object|semantic enables embedding-based selection of the target model.|
+|`llm.virtualModels[].routing.semantic.embeddingModel`|string|embeddingModel is an existing llm.models entry used to embed route phrases and request text.|
+|`llm.virtualModels[].routing.semantic.defaultModel`|string|defaultModel is selected when semantic routing is not ready, fails, or no target crosses its threshold.|
+|`llm.virtualModels[].routing.semantic.targets`|[]object|targets define the candidate models and example phrases used for semantic matching.|
+|`llm.virtualModels[].routing.semantic.targets[].model`|string|model is resolved against llm.models using the same wildcard matching as client requests.|
+|`llm.virtualModels[].routing.semantic.targets[].description`|string|description documents the intent of this semantic route.|
+|`llm.virtualModels[].routing.semantic.targets[].phrases`|[]string|phrases are example user prompts that should route to this target.|
+|`llm.virtualModels[].routing.semantic.targets[].scoreThreshold`|number|scoreThreshold is the minimum cosine similarity required to select this target.|
+|`llm.virtualModels[].routing.semantic.targets[].minInputTokens`|integer|minInputTokens is an optional minimum input token count for this target.|
+|`llm.virtualModels[].routing.semantic.targets[].maxInputTokens`|integer|maxInputTokens is an optional input token cap for this target.|
 |`llm.policies`|object|policies defines policies for handling incoming requests, before a model is selected|
 |`llm.policies.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`llm.policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|

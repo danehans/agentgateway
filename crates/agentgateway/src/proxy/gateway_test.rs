@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ::http::{HeaderMap, Method, StatusCode, Version, header};
 use agent_core::strng;
@@ -1388,6 +1388,86 @@ async fn setup_local_llm_config_with_user_model_header(yaml: &str) -> TestBind {
 	t
 }
 
+fn semantic_test_embedding(input: &str) -> Vec<f32> {
+	if input.to_ascii_lowercase().contains("code") {
+		vec![1.0, 0.0]
+	} else {
+		vec![0.0, 1.0]
+	}
+}
+
+fn semantic_test_embedding_response(body: &[u8]) -> Value {
+	let body: Value = serde_json::from_slice(body).expect("embedding request JSON");
+	let model = body
+		.get("model")
+		.and_then(Value::as_str)
+		.unwrap_or("text-embedding-3-small");
+	let inputs = match body.get("input") {
+		Some(Value::String(input)) => vec![input.clone()],
+		Some(Value::Array(inputs)) => inputs
+			.iter()
+			.map(|input| input.as_str().expect("string embedding input").to_string())
+			.collect(),
+		_ => panic!("embedding request should contain string input"),
+	};
+	let data = inputs
+		.iter()
+		.enumerate()
+		.map(|(idx, input)| {
+			json!({
+				"object": "embedding",
+				"index": idx,
+				"embedding": semantic_test_embedding(input),
+			})
+		})
+		.collect::<Vec<_>>();
+	json!({
+		"object": "list",
+		"model": model,
+		"data": data,
+		"usage": {
+			"prompt_tokens": inputs.len(),
+			"total_tokens": inputs.len(),
+		}
+	})
+}
+
+async fn semantic_routing_mock() -> MockServer {
+	let completion =
+		Arc::new(include_bytes!("../llm/tests/response/completions/basic.json").to_vec());
+	let mock = MockServer::start().await;
+	Mock::given(wiremock::matchers::path_regex("/.*"))
+		.respond_with(move |req: &wiremock::Request| {
+			if req.url.path().ends_with("/embeddings") {
+				return ResponseTemplate::new(200)
+					.set_body_json(semantic_test_embedding_response(&req.body));
+			}
+			ResponseTemplate::new(200).set_body_raw(completion.to_vec(), "application/json")
+		})
+		.mount(&mock)
+		.await;
+	mock
+}
+
+async fn wait_for_embedding_requests(mock: &MockServer, want: usize) {
+	let deadline = Instant::now() + Duration::from_secs(2);
+	loop {
+		let requests = mock.received_requests().await.expect("upstream requests");
+		let embedding_count = requests
+			.iter()
+			.filter(|request| request.url.path().ends_with("/embeddings"))
+			.count();
+		if embedding_count >= want {
+			return;
+		}
+		assert!(
+			Instant::now() < deadline,
+			"timed out waiting for {want} embedding requests; saw {embedding_count}"
+		);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+}
+
 #[tokio::test]
 async fn llm_local_router_handles_models_virtual_model_and_missing_model() {
 	let mock = body_mock(include_bytes!(
@@ -1484,6 +1564,102 @@ llm:
 			.expect("upstream requests")
 			.len(),
 		1
+	);
+}
+
+#[tokio::test]
+async fn llm_semantic_virtual_model_routes_after_warmup() {
+	let mock = semantic_routing_mock().await;
+	let config = format!(
+		r#"
+llm:
+  port: 4000
+  models:
+  - name: text-embedding-3-small
+    visibility: internal
+    provider: openAI
+    params:
+      baseUrl: http://{}
+  - name: general
+    visibility: internal
+    provider: openAI
+    params:
+      baseUrl: http://{}
+  - name: coding
+    visibility: internal
+    provider: openAI
+    params:
+      baseUrl: http://{}
+  virtualModels:
+  - name: smart
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: general
+        targets:
+        - model: coding
+          phrases:
+          - code examples and programming help
+          scoreThreshold: 0.5
+        - model: general
+          phrases:
+          - travel plans and general questions
+          scoreThreshold: 0.5
+"#,
+		mock.address(),
+		mock.address(),
+		mock.address()
+	);
+	let t = setup_local_llm_config(&config).await;
+	let io = t.serve_http(strng::literal!("bind/4000"));
+	let request_body = json!({
+		"model": "smart",
+		"messages": [{"role": "user", "content": "please write code in Rust"}]
+	});
+	let request_body = serde_json::to_vec(&request_body).expect("serialized request");
+
+	let res = send_request_body(
+		io.clone(),
+		Method::POST,
+		"http://lo/v1/chat/completions",
+		&request_body,
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	read_body_raw(res.into_body()).await;
+	wait_for_embedding_requests(&mock, 1).await;
+	tokio::time::sleep(Duration::from_millis(50)).await;
+
+	let res = send_request_body(
+		io,
+		Method::POST,
+		"http://lo/v1/chat/completions",
+		&request_body,
+	)
+	.await;
+	assert_eq!(res.status(), StatusCode::OK);
+	read_body_raw(res.into_body()).await;
+
+	let upstream_requests = mock.received_requests().await.expect("upstream requests");
+	let chat_requests = upstream_requests
+		.iter()
+		.filter(|request| request.url.path().ends_with("/chat/completions"))
+		.collect::<Vec<_>>();
+	let routed_body: Value = serde_json::from_slice(
+		&chat_requests
+			.last()
+			.expect("chat completion upstream request")
+			.body,
+	)
+	.expect("upstream request JSON");
+	assert_eq!(routed_body["model"], "coding");
+	assert!(
+		upstream_requests
+			.iter()
+			.filter(|request| request.url.path().ends_with("/embeddings"))
+			.count()
+			>= 2,
+		"expected warmup and query embedding calls"
 	);
 }
 

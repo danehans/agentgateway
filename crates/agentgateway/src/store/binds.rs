@@ -103,6 +103,8 @@ pub struct Store {
 	tcp_routes: HbHashMap<RouteTarget, Arc<TCPRouteSet>>,
 	listener_change_tx: watch::Sender<u64>,
 	listener_change_rx: watch::Receiver<u64>,
+	route_change_tx: watch::Sender<u64>,
+	route_change_rx: watch::Receiver<u64>,
 
 	tx: tokio::sync::mpsc::UnboundedSender<BindEvent>,
 	rx: Option<tokio::sync::mpsc::UnboundedReceiver<BindEvent>>,
@@ -429,7 +431,7 @@ impl LLMRequestPolicies {
 		Arc::new(route_policies)
 	}
 
-	fn merge_llm_policies(
+	pub(crate) fn merge_llm_policies(
 		preferred: &Arc<llm::Policy>,
 		fallback: &Arc<llm::Policy>,
 	) -> Arc<llm::Policy> {
@@ -577,6 +579,7 @@ impl Store {
 	) -> Self {
 		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 		let (listener_change_tx, listener_change_rx) = watch::channel(0);
+		let (route_change_tx, route_change_rx) = watch::channel(0);
 		Self {
 			ipv6_enabled,
 			dynamic_ca_cert_cache,
@@ -596,6 +599,8 @@ impl Store {
 			tcp_routes: Default::default(),
 			listener_change_tx,
 			listener_change_rx,
+			route_change_tx,
+			route_change_rx,
 			tx,
 			rx: Some(rx),
 		}
@@ -630,8 +635,21 @@ impl Store {
 			.cloned()
 	}
 
+	pub fn llm_routers(&self) -> Vec<Arc<crate::llm::model_router::ModelRouter>> {
+		self
+			.http_routes
+			.values()
+			.flat_map(|routes| routes.iter())
+			.filter_map(|route| route.llm_router.clone())
+			.collect()
+	}
+
 	pub fn subscribe_listener_changes(&self) -> watch::Receiver<u64> {
 		self.listener_change_rx.clone()
+	}
+
+	pub fn subscribe_route_changes(&self) -> watch::Receiver<u64> {
+		self.route_change_rx.clone()
 	}
 
 	pub fn get_bind_listener(&self, bind: &BindKey, listener: &ListenerKey) -> Option<Arc<Listener>> {
@@ -644,6 +662,12 @@ impl Store {
 	fn notify_listener_changed(&self) {
 		self
 			.listener_change_tx
+			.send_modify(|epoch| *epoch = epoch.saturating_add(1));
+	}
+
+	fn notify_route_changed(&self) {
+		self
+			.route_change_tx
 			.send_modify(|epoch| *epoch = epoch.saturating_add(1));
 	}
 
@@ -1348,6 +1372,7 @@ impl Store {
 		{
 			o.remove(&pol);
 		}
+		self.notify_route_changed();
 	}
 	#[instrument(
         level = Level::INFO,
@@ -1357,6 +1382,7 @@ impl Store {
     )]
 	pub fn remove_backend(&mut self, backend: BackendKey) {
 		self.backends.remove(&backend);
+		self.notify_route_changed();
 	}
 
 	#[instrument(
@@ -1381,6 +1407,7 @@ impl Store {
 
 	pub fn remove_route_group(&mut self, rg: RouteGroupKey) {
 		self.http_routes.remove(&Self::route_group_target_ref(&rg));
+		self.notify_route_changed();
 	}
 
 	pub fn lookup_route_group(&self, route: &RouteGroupKey) -> Option<Arc<RouteSet>> {
@@ -1422,6 +1449,7 @@ impl Store {
     )]
 	pub fn remove_route(&mut self, route: RouteKey) {
 		self.remove_http_route(&route);
+		self.notify_route_changed();
 	}
 
 	#[instrument(
@@ -1432,6 +1460,7 @@ impl Store {
     )]
 	pub fn remove_tcp_route(&mut self, tcp_route: RouteKey) {
 		self.remove_tcp_route_from_targets(&tcp_route);
+		self.notify_route_changed();
 	}
 
 	#[instrument(
@@ -1453,6 +1482,7 @@ impl Store {
 		}
 		let arc = Arc::new(b);
 		self.backends.insert(key, arc);
+		self.notify_route_changed();
 	}
 
 	pub fn insert_policy(&mut self, pol: TargetedPolicy) {
@@ -1468,6 +1498,7 @@ impl Store {
 			.entry(pol.target.clone())
 			.or_default()
 			.insert(pol.key.clone());
+		self.notify_route_changed();
 	}
 
 	pub fn insert_listener(&mut self, lis: Listener, bind_name: BindKey) {
@@ -1490,26 +1521,31 @@ impl Store {
 	pub fn insert_route_into_group(&mut self, r: Route, ln: RouteGroupKey) {
 		debug!(group=%ln, route=%r.key, "insert route");
 		self.insert_http_route_target(RouteTarget::RouteGroup(ln), r);
+		self.notify_route_changed();
 	}
 
 	pub fn insert_route(&mut self, r: Route, ln: ListenerKey) {
 		debug!(listener=%ln, route=%r.key, "insert route");
 		self.insert_http_route_target(RouteTarget::Listener(ln), r);
+		self.notify_route_changed();
 	}
 
 	pub fn insert_tcp_route(&mut self, r: TCPRoute, ln: ListenerKey) {
 		debug!(listener=%ln,route=%r.key, "insert tcp route");
 		self.insert_tcp_route_target(RouteTarget::Listener(ln), r);
+		self.notify_route_changed();
 	}
 
 	pub fn insert_service_route(&mut self, r: Route, service_key: NamespacedHostname) {
 		debug!(service=%service_key, route=%r.key, "insert service route");
 		self.insert_http_route_target(RouteTarget::Service(service_key), r);
+		self.notify_route_changed();
 	}
 
 	pub fn insert_service_tcp_route(&mut self, r: TCPRoute, service_key: NamespacedHostname) {
 		debug!(service=%service_key, route=%r.key, "insert service tcp route");
 		self.insert_tcp_route_target(RouteTarget::Service(service_key), r);
+		self.notify_route_changed();
 	}
 
 	pub fn get_service_routes(&self, key: &NamespacedHostname) -> Option<Arc<RouteSet>> {
@@ -2097,6 +2133,33 @@ mod tests {
 				.as_ref()
 				.is_some_and(|routes| routes.contains(&strng::literal!("route")))
 		);
+	}
+
+	#[test]
+	fn route_change_subscription_updates_on_route_insert() {
+		let mut store = Store::with_ipv6_enabled(true);
+		let rx = store.subscribe_route_changes();
+		let before = *rx.borrow();
+		let route = Route {
+			key: strng::literal!("route"),
+			service_key: None,
+			service_port: 0,
+			name: RouteName {
+				name: strng::literal!("route"),
+				namespace: strng::literal!("ns"),
+				rule_name: None,
+				kind: None,
+			},
+			hostnames: vec![],
+			matches: vec![],
+			llm_router: None,
+			inline_policies: vec![],
+			backends: vec![],
+		};
+
+		store.insert_route(route, strng::literal!("listener"));
+
+		assert!(*rx.borrow() > before);
 	}
 
 	#[test]

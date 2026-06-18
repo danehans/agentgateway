@@ -43,6 +43,11 @@ The `http` example shows how to use agentgateway to serve generic HTTP traffic.
 
 The `prompt-enrichment` example shows how to append or preprend prompts to agentgateway AI requests.
 
+### [Semantic Routing](semantic-routing/README.md)
+
+The `semantic-routing` example shows how to route OpenAI-compatible chat completion requests by
+semantic similarity, with optional `minInputTokens` and `maxInputTokens` bounds.
+
 ### [Standalone EPP](standalone-epp/README.md)
 
 The `standalone-epp` example shows the v1 local config shape for running agentgateway as the sidecar proxy

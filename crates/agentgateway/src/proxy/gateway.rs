@@ -22,6 +22,7 @@ use tokio::task::{AbortHandle, JoinSet};
 use tokio_stream::StreamExt;
 use tracing::{Instrument, debug, error, event, info, info_span, warn};
 
+use crate::proxy::httpproxy::PolicyClient;
 use crate::proxy::{ProxyError, WaypointService, dtrace};
 use crate::store::{BindEvent, BindListeners, FrontendPolices};
 use crate::telemetry::metrics::TCPLabels;
@@ -141,6 +142,20 @@ impl Gateway {
 		Gateway { drain, pi }
 	}
 
+	fn warm_semantic_routes(pi: Arc<ProxyInputs>) {
+		let routers = {
+			let binds = pi.stores.read_binds();
+			binds.llm_routers()
+		};
+		if routers.is_empty() {
+			return;
+		}
+		let client = PolicyClient::new(pi);
+		for router in routers {
+			router.warm_semantic_routes(client.clone());
+		}
+	}
+
 	pub async fn run(self) {
 		let drain = self.drain.clone();
 		let subdrain = self.drain.clone();
@@ -149,6 +164,11 @@ impl Gateway {
 			let mut binds = self.pi.stores.binds.write();
 			binds.subscribe()
 		};
+		let mut route_changes = {
+			let binds = self.pi.stores.read_binds();
+			binds.subscribe_route_changes()
+		};
+		Self::warm_semantic_routes(self.pi.clone());
 		let mut active: HashMap<BindKey, AbortHandle> = HashMap::new();
 		let mut handle_bind = |js: &mut JoinSet<anyhow::Result<()>>, b: BindEvent| {
 			let (bind_key, bind, listeners) = match b {
@@ -203,6 +223,11 @@ impl Gateway {
 			tokio::select! {
 				Some(res) = binds.next() => {
 					handle_bind(&mut js, res);
+				}
+				changed = route_changes.changed() => {
+					if changed.is_ok() {
+						Self::warm_semantic_routes(self.pi.clone());
+					}
 				}
 				Some(res) = js.join_next() => {
 					warn!("bind complete {res:?}");

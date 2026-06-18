@@ -42,6 +42,7 @@ mod types;
 
 use policy::streaming_guardrails::GuardedSseBody;
 pub use types::SimpleChatCompletionMessage;
+pub(crate) use types::embeddings;
 
 use crate::cel::{Executor, LLMContext, RequestSnapshot};
 use crate::proxy::dtrace;
@@ -381,6 +382,20 @@ impl AIProvider {
 			AIProvider::Custom(p) => p.model.clone(),
 		}
 	}
+
+	pub fn supports_embeddings_route(&self) -> bool {
+		match self {
+			AIProvider::Custom(p) => p.supports(custom::ProviderFormat::Embeddings),
+			AIProvider::OpenAI(_)
+			| AIProvider::Copilot(_)
+			| AIProvider::Gemini(_)
+			| AIProvider::Vertex(_)
+			| AIProvider::Bedrock(_)
+			| AIProvider::Azure(_) => true,
+			AIProvider::Anthropic(_) => false,
+		}
+	}
+
 	/// Default backend policies (TLS + auth) for connecting to the provider. Split from
 	/// [`Self::default_connector_target`] so callers can compute effective policies, resolve the LLM
 	/// route from them, and only then pick the connection target. Returns `None` for custom providers,

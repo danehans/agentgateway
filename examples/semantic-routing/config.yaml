@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+
+config:
+  logging:
+    level: debug
+    format: json
+
+llm:
+  port: 4000
+  models:
+  - name: text-embedding-3-small
+    visibility: internal
+    provider: openAI
+    params:
+      model: text-embedding-3-small
+      apiKey: "$OPENAI_API_KEY"
+
+  - name: gpt-3.5-turbo
+    visibility: internal
+    provider: openAI
+    params:
+      model: gpt-3.5-turbo
+      apiKey: "$OPENAI_API_KEY"
+
+  - name: gpt-4o-mini
+    visibility: internal
+    provider: openAI
+    params:
+      model: gpt-4o-mini
+      apiKey: "$OPENAI_API_KEY"
+
+  - name: gpt-4.1-mini
+    visibility: internal
+    provider: openAI
+    params:
+      model: gpt-4.1-mini
+      apiKey: "$OPENAI_API_KEY"
+
+  virtualModels:
+  - name: semantic-basic
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: gpt-3.5-turbo
+        targets:
+        - model: gpt-4o-mini
+          description: Coding and implementation prompts.
+          phrases:
+          - write rust code for a small HTTP handler
+          - debug a Rust compiler error
+          - implement an API endpoint
+
+  - name: semantic-max-tokens
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: gpt-3.5-turbo
+        targets:
+        - model: gpt-4.1-mini
+          description: Architecture prompts capped at short input sizes.
+          phrases:
+          - compare Redis and Postgres for a job queue
+          - compare architecture tradeoffs
+          scoreThreshold: 0.40
+          maxInputTokens: 64
+
+  - name: semantic-min-tokens
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: gpt-3.5-turbo
+        targets:
+        - model: gpt-4.1-mini
+          description: Architecture prompts that need enough context.
+          phrases:
+          - compare Redis and Postgres for a job queue
+          - compare architecture tradeoffs
+          scoreThreshold: 0.40
+          minInputTokens: 80
+
+  - name: semantic-token-range
+    routing:
+      semantic:
+        embeddingModel: text-embedding-3-small
+        defaultModel: gpt-3.5-turbo
+        targets:
+        - model: gpt-4.1-mini
+          description: Architecture prompts inside a bounded token range.
+          phrases:
+          - compare Redis and Postgres for a job queue
+          - compare architecture tradeoffs
+          scoreThreshold: 0.40
+          minInputTokens: 30
+          maxInputTokens: 160

@@ -798,7 +798,8 @@ impl HTTPProxy {
 		debug!(bind=%bind_name, listener=%selected_listener.key, route=%selected_route.key, "selected route");
 
 		let selected_llm_backend = if let Some(router) = &selected_route.llm_router {
-			match router.resolve(&mut req).await {
+			let policy_client = self.policy_client();
+			match router.resolve(&mut req, &policy_client).await {
 				model_router::ResolveResult::DirectResponse(resp) => {
 					return Err(ProxyResponse::DirectResponse(Box::new(resp))).snapshot_on_err(log, &mut req);
 				},
@@ -1379,6 +1380,19 @@ fn resolve_backend(b: RouteBackendReference, pi: &ProxyInputs) -> Result<RouteBa
 		backend,
 		inline_policies: b.inline_policies,
 	})
+}
+
+fn llm_request_policies_from_route_policies(policies: &[TrafficPolicy]) -> LLMRequestPolicies {
+	let mut request_policies = LLMRequestPolicies::default();
+	for policy in policies {
+		if let TrafficPolicy::AI(policy) = policy {
+			request_policies.llm = Some(match request_policies.llm.take() {
+				Some(existing) => LLMRequestPolicies::merge_llm_policies(&existing, policy),
+				None => policy.clone(),
+			});
+		}
+	}
+	request_policies
 }
 
 async fn handle_upgrade(
@@ -2442,8 +2456,8 @@ async fn make_backend_call(
 				policy_client.clone(),
 				llm_request,
 				llm_response_policies,
-				log.as_ref().expect("must be set").request_snapshot.clone(),
-				llm_response_log.expect("must be set"),
+				log.as_ref().and_then(|log| log.request_snapshot.clone()),
+				llm_response_log.unwrap_or_default(),
 				include_completion_in_log,
 				Some(&inputs.model_catalog),
 				resp,
@@ -3757,6 +3771,54 @@ impl PolicyClient {
 		self
 			.call_reference_with_policies(req, backend_ref, &[])
 			.await
+	}
+
+	pub async fn call_llm_embeddings(
+		&self,
+		backend_ref: RouteBackendReference,
+		route_policies: Vec<TrafficPolicy>,
+		model: &str,
+		input: Vec<String>,
+	) -> Result<Vec<Vec<f32>>, ProxyError> {
+		let start = std::time::Instant::now();
+		let selected_backend = resolve_backend(backend_ref, self.inputs.as_ref())?;
+		let backend_policies = get_backend_policies(
+			self.inputs.as_ref(),
+			&selected_backend.backend,
+			&selected_backend.inline_policies,
+			None,
+		);
+		let body = serde_json::to_vec(&serde_json::json!({
+			"model": model,
+			"input": input,
+			"encoding_format": "float",
+		}))
+		.map_err(|err| ProxyError::Processing(err.into()))?;
+		let req = ::http::Request::builder()
+			.method(::http::Method::POST)
+			.uri("http://agentgateway.internal/v1/embeddings")
+			.header(::http::header::CONTENT_TYPE, "application/json")
+			.body(crate::http::Body::from(body))
+			.map_err(|err| ProxyError::Processing(err.into()))?;
+		let route_policies = Arc::new(llm_request_policies_from_route_policies(&route_policies));
+		let mut req = Some(req);
+		let mut response_policies = ResponsePolicies::default();
+		let resp = make_backend_call(
+			self.inputs.clone(),
+			route_policies,
+			&selected_backend.backend.backend,
+			backend_policies.into(),
+			MustSnapshot::new(&mut req),
+			None,
+			&mut response_policies,
+		)
+		.await
+		.map_err(ProxyResponse::downcast)?;
+		self.observe_outbound(start);
+		let resp: crate::llm::embeddings::typed::Response = crate::json::from_response_body(resp)
+			.await
+			.map_err(|err| ProxyError::Processing(err.into()))?;
+		Ok(resp.data.into_iter().map(|item| item.embedding).collect())
 	}
 
 	pub async fn call_reference_with_policies(

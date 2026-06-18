@@ -9143,6 +9143,17 @@
               "type": "null"
             }
           ]
+        },
+        "semantic": {
+          "description": "semantic enables embedding-based selection of the target model.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalLLMSemanticRouting"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -9257,6 +9268,84 @@
       "additionalProperties": false,
       "required": [
         "model"
+      ]
+    },
+    "LocalLLMSemanticRouting": {
+      "type": "object",
+      "properties": {
+        "embeddingModel": {
+          "description": "embeddingModel is an existing llm.models entry used to embed route phrases and request text.",
+          "type": "string"
+        },
+        "defaultModel": {
+          "description": "defaultModel is selected when semantic routing is not ready, fails, or no target crosses its threshold.",
+          "type": "string"
+        },
+        "targets": {
+          "description": "targets define the candidate models and example phrases used for semantic matching.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LocalLLMSemanticTarget"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "embeddingModel",
+        "defaultModel",
+        "targets"
+      ]
+    },
+    "LocalLLMSemanticTarget": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "model is resolved against llm.models using the same wildcard matching as client requests.",
+          "type": "string"
+        },
+        "description": {
+          "description": "description documents the intent of this semantic route.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phrases": {
+          "description": "phrases are example user prompts that should route to this target.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scoreThreshold": {
+          "description": "scoreThreshold is the minimum cosine similarity required to select this target.",
+          "type": "number",
+          "format": "float",
+          "default": 0.5
+        },
+        "minInputTokens": {
+          "description": "minInputTokens is an optional minimum input token count for this target.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "maxInputTokens": {
+          "description": "maxInputTokens is an optional input token cap for this target.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "phrases"
       ]
     },
     "LocalLLMPolicy": {

@@ -379,6 +379,9 @@ pub struct LocalLLMVirtualModelRouting {
 	/// in order until the best match is found.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	conditional: Option<LocalLLMConditionalRouting>,
+	/// semantic enables embedding-based selection of the target model.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	semantic: Option<LocalLLMSemanticRouting>,
 }
 
 #[apply(schema_de!)]
@@ -422,6 +425,36 @@ pub struct LocalLLMConditionalTarget {
 	when: Option<Arc<cel::Expression>>,
 	/// model is resolved against llm.models using the same wildcard matching as client requests.
 	model: String,
+}
+
+#[apply(schema_de!)]
+pub struct LocalLLMSemanticRouting {
+	/// embeddingModel is an existing llm.models entry used to embed route phrases and request text.
+	embedding_model: String,
+	/// defaultModel is selected when semantic routing is not ready, fails, or no target crosses its threshold.
+	default_model: String,
+	/// targets define the candidate models and example phrases used for semantic matching.
+	targets: Vec<LocalLLMSemanticTarget>,
+}
+
+#[apply(schema_de!)]
+pub struct LocalLLMSemanticTarget {
+	/// model is resolved against llm.models using the same wildcard matching as client requests.
+	model: String,
+	/// description documents the intent of this semantic route.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	description: Option<String>,
+	/// phrases are example user prompts that should route to this target.
+	phrases: Vec<String>,
+	/// scoreThreshold is the minimum cosine similarity required to select this target.
+	#[serde(default = "default_semantic_score_threshold")]
+	score_threshold: f32,
+	/// minInputTokens is an optional minimum input token count for this target.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	min_input_tokens: Option<u64>,
+	/// maxInputTokens is an optional input token cap for this target.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	max_input_tokens: Option<u64>,
 }
 
 #[apply(schema_de!)]
@@ -1123,6 +1156,10 @@ pub struct LocalRouteBackend {
 
 fn default_weight() -> usize {
 	1
+}
+
+fn default_semantic_score_threshold() -> f32 {
+	0.5
 }
 
 #[apply(schema_de!)]
@@ -2483,6 +2520,7 @@ enum LocalLLMVirtualRoutingStrategy<'a> {
 	Weighted(&'a LocalLLMWeightedRouting),
 	Failover(&'a LocalLLMFailoverRouting),
 	Conditional(&'a LocalLLMConditionalRouting),
+	Semantic(&'a LocalLLMSemanticRouting),
 }
 
 fn llm_model_matches(pattern: &str, model: &str) -> anyhow::Result<bool> {
@@ -2514,6 +2552,11 @@ impl<'a> LocalLLMVirtualRoutingStrategy<'a> {
 					.iter()
 					.map(|target| target.model.as_str()),
 			),
+			Self::Semantic(semantic) => Box::new(
+				std::iter::once(semantic.embedding_model.as_str())
+					.chain(std::iter::once(semantic.default_model.as_str()))
+					.chain(semantic.targets.iter().map(|target| target.model.as_str())),
+			),
 		}
 	}
 }
@@ -2522,7 +2565,8 @@ impl LocalLLMVirtualModel {
 	fn routing_strategy(&self) -> anyhow::Result<LocalLLMVirtualRoutingStrategy<'_>> {
 		let strategy_count = usize::from(self.routing.weighted.is_some())
 			+ usize::from(self.routing.failover.is_some())
-			+ usize::from(self.routing.conditional.is_some());
+			+ usize::from(self.routing.conditional.is_some())
+			+ usize::from(self.routing.semantic.is_some());
 		if strategy_count != 1 {
 			bail!(
 				"virtual model {} must specify exactly one routing strategy",
@@ -2557,6 +2601,54 @@ impl LocalLLMVirtualModel {
 				);
 			}
 			return Ok(LocalLLMVirtualRoutingStrategy::Weighted(weighted));
+		}
+		if let Some(semantic) = self.routing.semantic.as_ref() {
+			if semantic.targets.is_empty() {
+				bail!(
+					"virtual model {} must specify at least one semantic target",
+					self.name
+				);
+			}
+			for target in &semantic.targets {
+				if target.phrases.is_empty() {
+					bail!(
+						"virtual model {} semantic target {} must specify at least one phrase",
+						self.name,
+						target.model
+					);
+				}
+				if !(0.0..=1.0).contains(&target.score_threshold) {
+					bail!(
+						"virtual model {} semantic target {} scoreThreshold must be between 0 and 1",
+						self.name,
+						target.model
+					);
+				}
+				if target.min_input_tokens == Some(0) {
+					bail!(
+						"virtual model {} semantic target {} minInputTokens must be greater than 0",
+						self.name,
+						target.model
+					);
+				}
+				if target.max_input_tokens == Some(0) {
+					bail!(
+						"virtual model {} semantic target {} maxInputTokens must be greater than 0",
+						self.name,
+						target.model
+					);
+				}
+				if let (Some(min), Some(max)) = (target.min_input_tokens, target.max_input_tokens)
+					&& min > max
+				{
+					bail!(
+						"virtual model {} semantic target {} minInputTokens must be less than or equal to maxInputTokens",
+						self.name,
+						target.model
+					);
+				}
+			}
+			return Ok(LocalLLMVirtualRoutingStrategy::Semantic(semantic));
 		}
 		let failover = self
 			.routing
@@ -3157,6 +3249,40 @@ async fn convert_llm_config(
 						})
 						.collect(),
 				)
+			},
+			LocalLLMVirtualRoutingStrategy::Semantic(semantic) => {
+				let embedding_model = resolved_models.resolve(&semantic.embedding_model)?;
+				if !embedding_model
+					.provider
+					.provider
+					.supports_embeddings_route()
+				{
+					bail!(
+						"virtual model {} semantic embeddingModel {} does not support embeddings",
+						virtual_model.name,
+						semantic.embedding_model
+					);
+				}
+				resolved_models.resolve(&semantic.default_model)?;
+				for target in &semantic.targets {
+					resolved_models.resolve(&target.model)?;
+				}
+				llm::model_router::VirtualModelRouting::Semantic(llm::model_router::SemanticRouting::new(
+					semantic.embedding_model.clone(),
+					semantic.default_model.clone(),
+					semantic
+						.targets
+						.iter()
+						.map(|target| llm::model_router::SemanticTarget {
+							model: target.model.clone(),
+							description: target.description.clone(),
+							phrases: target.phrases.clone(),
+							score_threshold: target.score_threshold,
+							min_input_tokens: target.min_input_tokens,
+							max_input_tokens: target.max_input_tokens,
+						})
+						.collect(),
+				))
 			},
 			LocalLLMVirtualRoutingStrategy::Failover(failover) => {
 				let provider_groups = failover
