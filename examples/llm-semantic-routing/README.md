@@ -17,11 +17,12 @@ LLM provider(s)
 
 Each example focuses on a different production use case.
 
-| Example | Demonstrates | Best for |
-| --- | --- | --- |
-| [Cost-based routing](k8s/cost-based/) | Route requests to lower-cost or higher-capability models based on semantic classification. | Cost optimization while maintaining response quality. |
-| [Tier-aware routing](k8s/tier-aware/) | Select different model pools according to authenticated user entitlements. | SaaS plans, internal vs external users, premium AI features. |
-| [Semantic caching](k8s/semantic-cache/) | Cache semantically equivalent requests in Redis Open Source and optionally share entries across vSR replicas. | Product support, documentation assistants, FAQ chatbots, and other workloads with many repeated questions. |
+| Agentgateway mode | Example | Demonstrates | Best for |
+| --- | --- | --- | --- |
+| Kubernetes | [Cost-based routing](k8s/cost-based/) | Route requests to lower-cost or higher-capability models based on semantic classification. | Cost optimization while maintaining response quality. |
+| Kubernetes | [Tier-aware routing](k8s/tier-aware/) | Select different model pools according to authenticated user entitlements. | SaaS plans, internal vs external users, premium AI features. |
+| Kubernetes | [Semantic caching](k8s/semantic-cache/) | Cache semantically equivalent requests in Redis Open Source and optionally share entries across vSR replicas. | Product support, documentation assistants, FAQ chatbots, and other workloads with many repeated questions. |
+| Standalone | [Tier-aware routing](standalone/tier-aware-single-runtime/) | Use one YAML-configured vSR runtime with standalone agentgateway in Docker Compose. | Local development and deployments without Kubernetes. |
 
 ## Choosing an example
 
@@ -52,7 +53,10 @@ Typical goals include:
 - premium AI features
 - provider-specific model pools
 
-See: `k8s/tier-aware`
+Choose a deployment pattern:
+
+- [Kubernetes with CRDs](k8s/tier-aware/): separate vSR runtimes per tier.
+- [Standalone with Docker Compose](standalone/tier-aware-single-runtime/): one shared vSR runtime configured with canonical YAML.
 
 ---
 
