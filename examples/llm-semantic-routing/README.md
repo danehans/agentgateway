@@ -17,11 +17,12 @@ LLM provider(s)
 
 Each example focuses on a different production use case.
 
-| Example | Demonstrates | Best for |
-| --- | --- | --- |
-| [Cost-based routing](k8s/cost-based/) | Route requests to lower-cost or higher-capability models based on semantic classification. | Cost optimization while maintaining response quality. |
-| [Tier-aware routing](k8s/tier-aware/) | Select different model pools according to authenticated user entitlements. | SaaS plans, internal vs external users, premium AI features. |
-| [Semantic caching](k8s/semantic-cache/) | Cache semantically equivalent requests in Redis Open Source and optionally share entries across vSR replicas. | Product support, documentation assistants, FAQ chatbots, and other workloads with many repeated questions. |
+| Agentgateway mode | Example | Demonstrates | Best for |
+| --- | --- | --- | --- |
+| Kubernetes | [Cost-based routing](k8s/cost-based/) | Route requests to lower-cost or higher-capability models based on semantic classification. | Cost optimization while maintaining response quality. |
+| Kubernetes | [Tier-aware routing](k8s/tier-aware/) | Select different model pools according to authenticated user entitlements. | SaaS plans, internal vs external users, premium AI features. |
+| Kubernetes | [Response caching](response-cache/kubernetes/) | Cache semantically equivalent requests in Redis Open Source and optionally share entries across vSR replicas. | Product support, documentation assistants, FAQ chatbots, and other workloads with many repeated questions. |
+| Standalone | [Response caching](response-cache/standalone/) | Run agentgateway, vSR, Redis, and a deterministic backend with Docker Compose. | Local response-cache evaluation without Kubernetes or provider credentials. |
 
 ## Choosing an example
 
@@ -56,7 +57,7 @@ See: `k8s/tier-aware`
 
 ---
 
-### Semantic caching
+### Response caching
 
 Use this example when many users ask **the same question in different ways**.
 
@@ -66,9 +67,9 @@ a Redis Open Source cache.
 
 The example demonstrates:
 
-- local kind deployment
+- local kind or Docker Compose deployment
 - Redis Open Source 8 with vector search
-- Redis-backed semantic cache
+- Redis-backed response cache in semantic mode
 - semantic cache hits for paraphrased requests
 - optional cache sharing across vSR replicas
 - cache persistence across Redis pod restarts
@@ -80,4 +81,5 @@ also backs other agentgateway-related services, such as [global rate
 limiting](https://agentgateway.dev/docs/kubernetes/main/documentation/security/rate-limit-global/).
 The example enables Redis persistence on a local persistent volume.
 
-See: `k8s/semantic-cache`
+Choose [Kubernetes](response-cache/kubernetes/) or [standalone Docker Compose](response-cache/standalone/).
+See the [shared response-cache overview](response-cache/README.md).
