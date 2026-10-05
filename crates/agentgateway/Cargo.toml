@@ -259,3 +259,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ossl350)'] }
 [[bench]]
 name = "bench_tests"
 harness = false
+
+[[example]]
+name = "grpc-model-router"
+path = "../../examples/llm-callout-grpc/router.rs"

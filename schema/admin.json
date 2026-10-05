@@ -1153,6 +1153,18 @@
             "callout"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "grpcCallout": {
+              "$ref": "#/$defs/GrpcCallout"
+            }
+          },
+          "required": [
+            "grpcCallout"
+          ],
+          "additionalProperties": false
         }
       ]
     },
@@ -3377,6 +3389,118 @@
         "key",
         "ttl",
         "maxEntries"
+      ]
+    },
+    "GrpcCallout": {
+      "description": "Typed unary model selection. No decision cache, retries, or request mutations\nare performed by this strategy. Model responses do not traverse the router.",
+      "type": "object",
+      "properties": {
+        "policies": {
+          "description": "Backend policies used when connecting to the service.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SimpleLocalBackendPolicies"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidates": {
+          "description": "Exact concrete model names the router may return (1..128). Wildcards and\nvirtual targets are not allowed. Final model authorization still applies.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context": {
+          "description": "CEL expressions producing strings sent as trusted routing context.\nAuthentication must establish any caller identity before this stage.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Expression"
+          }
+        },
+        "policyGeneration": {
+          "description": "Version of the routing policy. The router must echo this exact value.",
+          "type": "string",
+          "default": ""
+        },
+        "timeoutMs": {
+          "description": "Total routing RPC deadline in milliseconds, including response decoding.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 2000
+        },
+        "failureMode": {
+          "description": "Used for RPC/protocol failures only, never intentional router rejection.",
+          "$ref": "#/$defs/VirtualModelCalloutFailureMode",
+          "default": "failClosed"
+        }
+      },
+      "unevaluatedProperties": false,
+      "oneOf": [
+        {
+          "description": "Service reference. Service must be defined in the top level services list.",
+          "type": "object",
+          "properties": {
+            "service": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "description": "Name of the target Service, as defined in the top-level `services` list.",
+                  "$ref": "#/$defs/NamespacedHostname"
+                },
+                "port": {
+                  "description": "Port on the target Service to route to.",
+                  "type": "integer",
+                  "format": "uint16",
+                  "minimum": 0,
+                  "maximum": 65535
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "port"
+              ]
+            }
+          },
+          "required": [
+            "service"
+          ]
+        },
+        {
+          "description": "Hostname or IP address",
+          "type": "object",
+          "properties": {
+            "host": {
+              "description": "Hostname or IP address",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "description": "Explicit backend reference. Backend must be defined in the top level backends list",
+              "type": "string"
+            }
+          },
+          "required": [
+            "backend"
+          ]
+        }
+      ],
+      "required": [
+        "candidates",
+        "policyGeneration",
+        "timeoutMs",
+        "failureMode"
       ]
     }
   }

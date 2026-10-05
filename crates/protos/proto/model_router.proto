@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package agentgateway.dev.router.v1;
+
+option go_package = "github.com/agentgateway/agentgateway/api;api";
+
+// Selects a configured model before inference. This service never proxies model
+// responses. A routing reservation is not evidence of successful inference.
+service ModelRouter {
+  rpc Route(RouteRequest) returns (RouteResponse);
+}
+
+message RouteRequest {
+  string request_id = 1;
+  string requested_model = 2;
+  // Version one supports openai_chat only. JSON preserves provider extensions
+  // without introducing a second schema for the inference API.
+  string input_format = 3;
+  bytes request_json = 4;
+  // Exact configured names; candidates are not an authorization grant.
+  repeated string candidates = 5;
+  // Values explicitly supplied by gateway CEL expressions. Client headers are
+  // not implicitly copied. Authentication must precede routing.
+  map<string, string> context = 6;
+  string policy_generation = 7;
+}
+
+message RouteResponse {
+  // Must echo RouteRequest.policy_generation, including the empty value.
+  string policy_generation = 1;
+  // At most 16 entries, 64-byte keys and 256-byte values. No prompt content or
+  // secrets. Exposed as metadata.grpc_router.diagnostics, never upstream fields.
+  map<string, string> diagnostics = 2;
+  oneof outcome {
+    Selection selection = 3;
+    Rejection rejection = 4;
+  }
+}
+
+message Selection {
+  // An exact member of RouteRequest.candidates, never a URL or virtual model.
+  string model = 1;
+}
+
+message Rejection {
+  // One of 400, 403, 409, 413, 422, 429, or 503. An intentional rejection is
+  // never replaced by a fallback, even when its HTTP status is 503.
+  uint32 http_status = 1;
+  // A stable nonempty error identifier, at most 64 ASCII letters/digits/_/-.
+  string code = 2;
+  // Safe client-facing explanation, at most 1024 UTF-8 bytes.
+  string message = 3;
+}

@@ -3,6 +3,7 @@ package translator_test
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"text/template"
@@ -479,4 +480,40 @@ func (r ancestorRoute) NamespacedName(namespace string) types.NamespacedName {
 		Namespace: namespace,
 		Name:      r.Name,
 	}
+}
+
+func TestGRPCModelRouterAncestor(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/models/grpc-callout.yaml")
+	require.NoError(t, err)
+	input := strings.Split(string(fixture), "---\n# Output")[0]
+	ctx := testutils.BuildMockPolicyContext(t, []any{gatewayClassYAML, input})
+	ctx.Collections.Settings.EnableAgentgatewayModels = true
+	_, ri := testutils.Syncer(t, ctx)
+	found := false
+	for _, ancestors := range ri.Outputs.References.Ancestors.List() {
+		for _, ancestor := range ancestors.Objects {
+			if ancestor.Gateway.Name == "grpc-routing" && ancestor.Backend.Name == "grpc-model-router" && ancestor.Backend.Kind == "Service" {
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "routing service must be included in gateway backend discovery")
+}
+
+func TestGRPCModelRouterReferenceGrant(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/models/grpc-callout-grants.yaml")
+	require.NoError(t, err)
+	input := strings.Split(string(fixture), "---\n# Output")[0]
+	ctx := testutils.BuildMockPolicyContext(t, []any{gatewayClassYAML, input})
+	ctx.Collections.Settings.EnableAgentgatewayModels = true
+	_, ri := testutils.Syncer(t, ctx)
+	selected := map[string]bool{}
+	for _, resource := range ri.Outputs.Resources.List() {
+		model := resource.Resource.GetModelRoute()
+		if model != nil && model.GetVirtualModel().GetGrpcCallout() != nil {
+			selected[model.GetMatch().GetModel()] = true
+		}
+	}
+	require.True(t, selected["allowed"], "AgentgatewayModel must be recognized as the grant source")
+	require.False(t, selected["denied"], "an ungranted router must not be published")
 }

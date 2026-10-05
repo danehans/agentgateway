@@ -6,6 +6,7 @@ fn main() -> Result<(), anyhow::Error> {
 		"proto/citadel.proto",
 		"proto/ext_authz.proto",
 		"proto/ext_mcp.proto",
+		"proto/model_router.proto",
 		"proto/ext_proc.proto",
 		"proto/rls.proto",
 		"proto/ateapi.proto",

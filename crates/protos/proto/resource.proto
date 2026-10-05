@@ -2311,10 +2311,24 @@ message ModelRoute {
       BackendReference backend = 1;
     }
 
+    // Typed unary model routing using agentgateway.dev.router.v1.ModelRouter.
+    message GrpcCallout {
+      BackendReference target = 1;
+      repeated BackendPolicySpec inline_policies = 2;
+      repeated string candidates = 3;
+      // CEL expressions returning string values.
+      map<string, string> context = 4;
+      string policy_generation = 5;
+      uint32 timeout_ms = 6;
+      // Absent means fail closed. Intentional rejections never use fallback.
+      optional string fallback = 7;
+    }
+
     oneof routing {
       Weighted weighted = 1;
       Conditional conditional = 2;
       Failover failover = 3;
+      GrpcCallout grpc_callout = 4;
     }
   }
 

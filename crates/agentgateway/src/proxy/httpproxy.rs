@@ -2438,7 +2438,9 @@ async fn make_backend_call(
 			log.add(|log| log.path_match = Some(path_match));
 		}
 		let client = PolicyClient::new(inputs.clone()).with_parent(&req);
-		let resolved = router.resolve(&mut req, &inputs.model_catalog, &client).await;
+		let resolved = router
+			.resolve(&mut req, &inputs.model_catalog, &client)
+			.await;
 		if let Some(original_model) = req.extensions_mut().remove::<model_router::OriginalModel>() {
 			log.add(|log| log.original_model = Some(original_model.0));
 		}

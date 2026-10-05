@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
 
 	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/kube/krt"
@@ -100,6 +101,21 @@ func extractModelAncestorBackends(ctx RouteContext, model *agentgateway.Agentgat
 		}
 	}
 	collectConcreteModelBackends(model)
+
+	if vm := model.Spec.VirtualModel; vm != nil && vm.GRPCCallout != nil {
+		collect := func(ref gwv1.BackendObjectReference) {
+			gk := NormalizeReference(ref.Group, ref.Kind, wellknown.ServiceGVK.GroupKind())
+			if ancestorBackendAllowed(ctx, wellknown.AgentgatewayModelGVK, model.Namespace, gk, ref.Namespace, ref.Name) {
+				backends.Insert(utils.TypedNamespacedName{
+					Namespace: defaultString(ref.Namespace, model.Namespace), Name: string(ref.Name), Kind: gk.Kind,
+				})
+			}
+		}
+		collect(vm.GRPCCallout.BackendRef)
+		if vm.GRPCCallout.Policies != nil {
+			plugins.BackendReferencesFromBackendPolicy(&agentgateway.BackendFull{BackendSimple: *vm.GRPCCallout.Policies}, collect)
+		}
+	}
 
 	// Virtual model failover → concrete model → backendRefs.
 	// Failover targets must be concrete models (enforced by modelFailoverBackend runtime check).
@@ -541,6 +557,14 @@ func translateVirtualModel(ctx RouteContext, model *agentgateway.AgentgatewayMod
 				Conditional: &api.ModelRoute_VirtualModel_Conditional{Targets: targets},
 			},
 		}, nil, errors.Join(errs...)
+	case vm.GRPCCallout != nil:
+		callout, err := translateGRPCModelRouting(ctx, model)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &api.ModelRoute_VirtualModel{
+			Routing: &api.ModelRoute_VirtualModel_GrpcCallout_{GrpcCallout: callout},
+		}, nil, nil
 	case vm.Failover != nil:
 		backend, err := modelFailoverBackend(ctx, model, parent)
 		if backend == nil {
@@ -552,8 +576,119 @@ func translateVirtualModel(ctx RouteContext, model *agentgateway.AgentgatewayMod
 			},
 		}, []*api.Resource{backendResource(backend)}, err
 	default:
-		return nil, nil, fmt.Errorf("virtualModel must define weighted, conditional, or failover")
+		return nil, nil, fmt.Errorf("virtualModel must define weighted, conditional, failover, or grpcCallout")
 	}
+}
+
+// translateGRPCModelRouting rejects the entire configuration if any candidate
+// cannot be resolved. Sending a reduced set could change the router's policy.
+func translateGRPCModelRouting(ctx RouteContext, model *agentgateway.AgentgatewayModel) (*api.ModelRoute_VirtualModel_GrpcCallout, error) {
+	config := model.Spec.VirtualModel.GRPCCallout
+	resolve := func(target agentgateway.ModelTargetReference) (string, error) {
+		ref, name, err := resolveModelTarget(ctx, model.Namespace, target)
+		if err != nil {
+			return "", err
+		}
+		if ref.Spec.VirtualModel != nil || name == "" || len(name) > 256 || strings.Contains(name, "*") || strings.IndexFunc(name, unicode.IsControl) >= 0 || strings.TrimSpace(name) != name {
+			return "", fmt.Errorf("gRPC routing candidate %q must name a concrete model", name)
+		}
+		pattern := effectiveModelName(ref)
+		prefix, suffix, wildcard := strings.Cut(pattern, "*")
+		if (!wildcard && name != pattern) || (wildcard && (!strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix))) {
+			return "", fmt.Errorf("gRPC routing candidate %q does not match modelRef %s", name, ref.Name)
+		}
+		return name, nil
+	}
+	candidates := make([]string, 0, len(config.Candidates))
+	for _, target := range config.Candidates {
+		name, err := resolve(target)
+		if err != nil {
+			return nil, err
+		}
+		if slices.Contains(candidates, name) {
+			return nil, fmt.Errorf("duplicate gRPC routing candidate %q", name)
+		}
+		candidates = append(candidates, name)
+	}
+	if len(candidates) == 0 || len(candidates) > 128 {
+		return nil, fmt.Errorf("gRPC routing requires 1..128 candidates")
+	}
+	timeout := ptr.OrDefault(config.TimeoutMs, 2000)
+	if timeout < 1 || timeout > 60000 {
+		return nil, fmt.Errorf("gRPC routing timeoutMs must be 1..60000")
+	}
+	if len(config.PolicyGeneration) > 256 || len(config.Context) > 16 {
+		return nil, fmt.Errorf("gRPC routing policyGeneration or context exceeds limits")
+	}
+	for key := range config.Context {
+		if !validGRPCRoutingKey(key) {
+			return nil, fmt.Errorf("invalid gRPC routing context key %q", key)
+		}
+	}
+	result := &api.ModelRoute_VirtualModel_GrpcCallout{
+		Candidates: candidates, TimeoutMs: uint32(timeout), //nolint:gosec // Bounds checked above.
+		PolicyGeneration: config.PolicyGeneration, Context: map[string]string{},
+	}
+	for key, expression := range config.Context {
+		result.Context[key] = string(expression)
+	}
+	if config.Fallback != nil {
+		fallback, err := resolve(*config.Fallback)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(candidates, fallback) {
+			return nil, fmt.Errorf("gRPC routing fallback must be a candidate")
+		}
+		result.Fallback = &fallback
+	}
+	// Use AgentgatewayModel as the grant source for the router and its policies.
+	checkRef := func(ref gwv1.BackendObjectReference) error {
+		gk := NormalizeReference(ref.Group, ref.Kind, wellknown.ServiceGVK.GroupKind())
+		if !ancestorBackendAllowed(ctx, wellknown.AgentgatewayModelGVK, model.Namespace, gk, ref.Namespace, ref.Name) {
+			return fmt.Errorf("gRPC routing backend %s is not permitted by ReferenceGrant", ref.Name)
+		}
+		return nil
+	}
+	if err := checkRef(config.BackendRef); err != nil {
+		return nil, err
+	}
+	target, err := plugins.BuildBackendRef(plugins.PolicyCtx{
+		Krt: ctx.Krt, Collections: ctx.Collections, RouteBackend: ctx.References.RouteBackend,
+	}, config.BackendRef, model.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	result.Target = target
+	if config.Policies != nil {
+		policies := &agentgateway.BackendFull{BackendSimple: *config.Policies}
+		var grantErr error
+		plugins.BackendReferencesFromBackendPolicy(policies, func(ref gwv1.BackendObjectReference) {
+			if err := checkRef(ref); err != nil {
+				grantErr = err
+			}
+		})
+		if grantErr != nil {
+			return nil, grantErr
+		}
+		result.InlinePolicies, err = translateInlineModelBackendPolicy(ctx, model.Namespace, policies)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func validGRPCRoutingKey(key string) bool {
+	if len(key) == 0 || len(key) > 64 {
+		return false
+	}
+	for _, ch := range []byte(key) {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func modelConcreteBackend(ctx RouteContext, model *agentgateway.AgentgatewayModel, parent RouteParentReference, selectedModel *string) (*api.Backend, error) {

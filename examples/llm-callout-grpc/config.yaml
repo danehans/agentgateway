@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=../../schema/config.json
+gateways:
+  default:
+    port: 4000
+llm:
+  models:
+  - name: economy-model
+    provider: openai
+    visibility: internal
+    params:
+      baseUrl: http://127.0.0.1:3001/v1
+  - name: premium-model
+    provider: openai
+    visibility: internal
+    params:
+      baseUrl: http://127.0.0.1:3001/v1
+  virtualModels:
+  - name: auto
+    routing:
+      grpcCallout:
+        host: 127.0.0.1:50051
+        candidates: [economy-model, premium-model]
+        policyGeneration: demo-v1
+        timeoutMs: 2000
+        # This constant is a demo value, not authenticated tenant identity.
+        context:
+          tenant: "'demo'"
+        # Omit failureMode to return HTTP 503 on RPC/protocol failures.
+        failureMode:
+          fallback: economy-model

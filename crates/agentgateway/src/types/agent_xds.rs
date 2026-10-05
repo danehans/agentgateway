@@ -1786,6 +1786,40 @@ impl ModelRoute {
 						}
 						llm::model_router::VirtualModelRouting::Conditional(targets)
 					},
+					Some(virtual_model::Routing::GrpcCallout(config)) => {
+						let callout = llm::router_grpc::GrpcCallout {
+							target: SimpleBackendReferenceWithPolicies {
+								target: Arc::new(resolve_simple_reference(config.target.as_ref())),
+								policies: backend_policies_from_proto(&config.inline_policies, diagnostics)?,
+							},
+							candidates: config.candidates.clone(),
+							context: config
+								.context
+								.iter()
+								.map(|(key, value)| {
+									(
+										key.clone(),
+										permissive_cel_expression_arc(
+											diagnostics,
+											format!("modelRoute.{}.grpcCallout.context.{key}", model_match.model),
+											value.clone(),
+										),
+									)
+								})
+								.collect(),
+							policy_generation: config.policy_generation.clone(),
+							timeout_ms: config.timeout_ms,
+							failure_mode: config
+								.fallback
+								.clone()
+								.map(llm::router_callout::VirtualModelCalloutFailureMode::Fallback)
+								.unwrap_or_default(),
+						};
+						callout
+							.validate()
+							.map_err(|err| ProtoError::Generic(err.to_string()))?;
+						llm::model_router::VirtualModelRouting::GrpcCallout(Arc::new(callout))
+					},
 					Some(virtual_model::Routing::Failover(failover)) => {
 						llm::model_router::VirtualModelRouting::Failover {
 							backend: RouteBackendReference {
@@ -4305,6 +4339,62 @@ mod tests {
 	use super::*;
 	use crate::store::RequestPolicyTrait;
 	use crate::types::proto::agent::backend_policy_spec::Ai;
+
+	#[test]
+	fn grpc_callout_from_xds() {
+		use proto::agent::model_route::virtual_model::{GrpcCallout, Routing};
+		use proto::agent::model_route::{Kind, VirtualModel};
+		let config = GrpcCallout {
+			target: Some(proto::agent::BackendReference {
+				kind: Some(proto::agent::backend_reference::Kind::Service(
+					proto::agent::backend_reference::Service {
+						namespace: "default".into(),
+						hostname: "router.default.svc.cluster.local".into(),
+					},
+				)),
+				port: 50051,
+			}),
+			inline_policies: vec![],
+			candidates: vec!["concrete".into()],
+			context: HashMap::from([("tenant".into(), "'acme'".into())]),
+			policy_generation: "v1".into(),
+			timeout_ms: 2000,
+			fallback: Some("concrete".into()),
+		};
+		let convert = |config: GrpcCallout| {
+			ModelRoute::from_xds(
+				&proto::agent::ModelRoute {
+					key: "default/auto".into(),
+					listener_key: "default/gateway.llm".into(),
+					r#match: Some(proto::agent::model_route::Match {
+						model: "auto".into(),
+					}),
+					kind: Some(Kind::VirtualModel(VirtualModel {
+						routing: Some(Routing::GrpcCallout(config)),
+					})),
+					..Default::default()
+				},
+				&mut Diagnostics::default(),
+			)
+		};
+		let (route, _) = convert(config.clone()).unwrap();
+		let ModelRouteKind::Virtual(model) = route.kind else {
+			panic!("expected virtual model")
+		};
+		let llm::model_router::VirtualModelRouting::GrpcCallout(callout) = model.routing else {
+			panic!("expected gRPC routing")
+		};
+		assert_eq!(callout.policy_generation, "v1");
+		assert_eq!(callout.timeout_ms, 2000);
+		assert_eq!(callout.candidates, ["concrete"]);
+		assert!(callout.context.contains_key("tenant"));
+		let mut invalid = config.clone();
+		invalid.timeout_ms = 0;
+		assert!(convert(invalid).is_err());
+		let mut invalid = config;
+		invalid.fallback = Some("other".into());
+		assert!(convert(invalid).is_err());
+	}
 
 	#[test]
 	fn prompt_guard_scope_from_proto() {

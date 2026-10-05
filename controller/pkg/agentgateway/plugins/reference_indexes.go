@@ -76,6 +76,7 @@ func (e *BackendReferenceError) Error() string {
 func DefaultReferenceTypes(agw *AgwCollections) ReferenceTypes {
 	knownFromReferences := sets.New(
 		wellknown.AgentgatewayPolicyGVK.GroupKind(),
+		wellknown.AgentgatewayModelGVK.GroupKind(),
 		// An AgentgatewayBackend is a grant source for its own backendRefs,
 		// e.g. spec.policies.mcp.authentication.jwks.remote.
 		wellknown.AgentgatewayBackendGVK.GroupKind(),

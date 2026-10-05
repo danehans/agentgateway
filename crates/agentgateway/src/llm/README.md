@@ -14,3 +14,11 @@ Only fields we specifically operate on (like `model`) need to be included in the
 
 However, in some cases having the full typed definitions is useful, such as for conversion from one type to another.
 In these, we have additional `typed` variation that we upgrade the passhthrough type to internally.
+
+## External model selection
+
+Virtual models can delegate selection to an HTTP callout or the typed unary
+`agentgateway.dev.router.v1.ModelRouter/Route` RPC. Both resolve the chosen model
+through the normal model table and authorization path before inference.
+See the [gRPC protocol guide](../../../../docs/grpc-model-routing.md) and
+[runnable Rust example](../../../../examples/llm-callout-grpc).

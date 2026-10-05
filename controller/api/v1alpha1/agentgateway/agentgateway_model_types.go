@@ -296,7 +296,7 @@ const (
 	ModelVisibilityInternal ModelVisibility = "Internal"
 )
 
-// +kubebuilder:validation:ExactlyOneOf=weighted;failover;conditional
+// +kubebuilder:validation:ExactlyOneOf=weighted;failover;conditional;grpcCallout
 type VirtualModel struct {
 	// Weight-based model selection.
 	// +optional
@@ -309,6 +309,53 @@ type VirtualModel struct {
 	// Ordered condition-based model selection.
 	// +optional
 	Conditional *ConditionalModelRouting `json:"conditional,omitempty"`
+
+	// Typed unary model selection before inference. Supports Chat Completions.
+	// +optional
+	GRPCCallout *GRPCModelRouting `json:"grpcCallout,omitempty"`
+}
+
+// GRPCModelRouting calls agentgateway.dev.router.v1.ModelRouter/Route. The
+// router selects one candidate; normal model authorization still applies.
+type GRPCModelRouting struct {
+	// Backend implementing the routing RPC. Cross-namespace references require
+	// a ReferenceGrant when required by the controller's grant mode.
+	// +required
+	BackendRef gwv1.BackendObjectReference `json:"backendRef"`
+
+	// Concrete models the router may select. Names are resolved from these
+	// same-namespace model references and sent to the router.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=128
+	// +required
+	Candidates []ModelTargetReference `json:"candidates"`
+
+	// Explicit routing context. Expressions must return strings of at most
+	// 1024 bytes. Use authenticated identity for tenant/session protection.
+	// +kubebuilder:validation:MaxProperties=16
+	// +optional
+	Context map[string]CELExpression `json:"context,omitempty"`
+
+	// Policy version the router must echo. A mismatch returns HTTP 409.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	PolicyGeneration string `json:"policyGeneration,omitempty"`
+
+	// Total RPC deadline in milliseconds, including response decoding.
+	// +kubebuilder:default=2000
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=60000
+	// +optional
+	TimeoutMs *int32 `json:"timeoutMs,omitempty"`
+
+	// Candidate used only for RPC/protocol failures. Omit to fail closed.
+	// Deliberate router rejections never use the fallback.
+	// +optional
+	Fallback *ModelTargetReference `json:"fallback,omitempty"`
+
+	// Connection and authentication settings for the routing backend.
+	// +optional
+	Policies *BackendSimple `json:"policies,omitempty"`
 }
 
 type WeightedModelRouting struct {

@@ -2729,3 +2729,39 @@ binds:
 		.expect("a change to the key file should notify the resource manager")
 		.expect("resource change channel should stay open");
 }
+
+#[tokio::test]
+async fn grpc_callout_example_and_validation() {
+	let example = include_str!("../../../../examples/llm-callout-grpc/config.yaml");
+	normalize_test_config(example)
+		.await
+		.expect("valid gRPC example");
+	for (from, to, message) in [
+		(
+			"candidates: [economy-model, premium-model]",
+			"candidates: [economy-model, missing]",
+			"does not match any llm.models entry",
+		),
+		(
+			"candidates: [economy-model, premium-model]",
+			"candidates: [economy-model, economy-model]",
+			"duplicate",
+		),
+		(
+			"fallback: economy-model",
+			"fallback: missing",
+			"fallback must be a candidate",
+		),
+		("timeoutMs: 2000", "timeoutMs: 0", "timeoutMs"),
+		(
+			"routing:\n",
+			"routing:\n      weighted:\n        targets:\n        - model: economy-model\n",
+			"exactly one routing strategy",
+		),
+	] {
+		let err = normalize_test_config(&example.replace(from, to))
+			.await
+			.expect_err("invalid gRPC config");
+		assert!(err.to_string().contains(message), "{err:?}");
+	}
+}

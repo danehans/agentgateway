@@ -181,3 +181,44 @@ spec:
     guardrail:
       identifier: test-guardrail
       version: "1"
+---
+_err: exactly one of the fields in [weighted failover conditional grpcCallout] must be set
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: grpc-mixed-strategies
+spec:
+  parentRefs:
+  - name: ai-gateway
+    sectionName: llm
+  virtualModel:
+    weighted:
+      targets:
+      - modelRef:
+          name: concrete-model
+    grpcCallout:
+      backendRef:
+        name: router
+        port: 50051
+      candidates:
+      - modelRef:
+          name: concrete-model
+---
+_err: should be greater than or equal to
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: grpc-invalid-timeout
+spec:
+  parentRefs:
+  - name: ai-gateway
+    sectionName: llm
+  virtualModel:
+    grpcCallout:
+      backendRef:
+        name: router
+        port: 50051
+      candidates:
+      - modelRef:
+          name: concrete-model
+      timeoutMs: 0

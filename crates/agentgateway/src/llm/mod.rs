@@ -33,6 +33,7 @@ use crate::*;
 pub mod model_router;
 pub mod model_transform;
 pub mod router_callout;
+pub mod router_grpc;
 pub use agent_llm::{azure, bedrock, vertex};
 
 /// Default body buffer limit once a request enters LLM processing.
