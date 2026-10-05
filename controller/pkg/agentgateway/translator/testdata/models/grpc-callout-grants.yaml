@@ -1,0 +1,385 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-model-router
+  namespace: default
+spec:
+  selector:
+    app: grpc-model-router
+  ports:
+  - name: grpc
+    port: 50051
+    appProtocol: kubernetes.io/h2c
+  - name: inference
+    port: 3001
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: grpc-routing
+  namespace: default
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+  - name: llm
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      kinds:
+      - group: agentgateway.dev
+        kind: AgentgatewayModel
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: economy-model
+  namespace: default
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: grpc-routing
+    sectionName: llm
+  visibility: Internal
+  provider: OpenAI
+  baseURL: http://grpc-model-router.default.svc.cluster.local:3001/v1
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: premium-model
+  namespace: default
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: grpc-routing
+    sectionName: llm
+  visibility: Internal
+  provider: OpenAI
+  baseURL: http://grpc-model-router.default.svc.cluster.local:3001/v1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: routers
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: allowed
+  namespace: routers
+spec:
+  ports:
+  - port: 50051
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: allowed
+  namespace: default
+spec:
+  parentRefs:
+  - name: grpc-routing
+    sectionName: llm
+  virtualModel:
+    grpcCallout:
+      backendRef:
+        name: allowed
+        namespace: routers
+        port: 50051
+      candidates:
+      - modelRef:
+          name: economy-model
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: denied
+  namespace: routers
+spec:
+  ports:
+  - port: 50051
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: denied
+  namespace: default
+spec:
+  parentRefs:
+  - name: grpc-routing
+    sectionName: llm
+  virtualModel:
+    grpcCallout:
+      backendRef:
+        name: denied
+        namespace: routers
+        port: 50051
+      candidates:
+      - modelRef:
+          name: economy-model
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-model-router
+  namespace: routers
+spec:
+  from:
+  - group: agentgateway.dev
+    kind: AgentgatewayModel
+    namespace: default
+  to:
+  - group: ""
+    kind: Service
+    name: allowed
+
+---
+# Output
+output:
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    backend:
+      ai:
+        providerGroups:
+        - providers:
+          - baseUrl: http://grpc-model-router.default.svc.cluster.local:3001/v1
+            name: backend
+            openai: {}
+      key: default/economy-model/backend.llm
+      name:
+        name: economy-model
+        namespace: default
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    backend:
+      ai:
+        providerGroups:
+        - providers:
+          - baseUrl: http://grpc-model-router.default.svc.cluster.local:3001/v1
+            name: backend
+            openai: {}
+      key: default/premium-model/backend.llm
+      name:
+        name: premium-model
+        namespace: default
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    bind:
+      key: 80/default/grpc-routing
+      port: 80
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    listener:
+      bindKey: 80/default/grpc-routing
+      key: default/grpc-routing.llm
+      name:
+        gatewayName: grpc-routing
+        gatewayNamespace: default
+        listenerName: llm
+      protocol: HTTP
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    modelRoute:
+      key: default/allowed.llm
+      listenerKey: default/grpc-routing.llm
+      match:
+        model: allowed
+      virtualModel:
+        grpcCallout:
+          candidates:
+          - economy-model
+          target:
+            port: 50051
+            service:
+              hostname: allowed.routers.svc.cluster.local
+              namespace: routers
+          timeoutMs: 2000
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    modelRoute:
+      concreteModel:
+        backend:
+          backend: default/economy-model/backend.llm
+        modelVisibility: INTERNAL
+      key: default/economy-model.llm
+      listenerKey: default/grpc-routing.llm
+      match:
+        model: economy-model
+- gateway:
+    Name: grpc-routing
+    Namespace: default
+  resource:
+    modelRoute:
+      concreteModel:
+        backend:
+          backend: default/premium-model/backend.llm
+        modelVisibility: INTERNAL
+      key: default/premium-model.llm
+      listenerKey: default/grpc-routing.llm
+      match:
+        model: premium-model
+status:
+- apiVersion: agentgateway.dev/v1alpha1
+  kind: AgentgatewayModel
+  metadata:
+    name: allowed
+    namespace: default
+  spec: null
+  status:
+    parents:
+    - conditions:
+      - lastTransitionTime: fake
+        message: Successfully accepted AgentgatewayModel
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: fake
+        message: ""
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      controllerName: agentgateway.dev/agentgateway
+      parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: grpc-routing
+        namespace: default
+        sectionName: llm
+- apiVersion: agentgateway.dev/v1alpha1
+  kind: AgentgatewayModel
+  metadata:
+    name: denied
+    namespace: default
+  spec: null
+  status:
+    parents:
+    - conditions:
+      - lastTransitionTime: fake
+        message: Successfully accepted AgentgatewayModel
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: fake
+        message: gRPC routing backend denied is not permitted by ReferenceGrant
+        reason: Invalid
+        status: "False"
+        type: ResolvedRefs
+      controllerName: agentgateway.dev/agentgateway
+      parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: grpc-routing
+        namespace: default
+        sectionName: llm
+- apiVersion: agentgateway.dev/v1alpha1
+  kind: AgentgatewayModel
+  metadata:
+    name: economy-model
+    namespace: default
+  spec: null
+  status:
+    parents:
+    - conditions:
+      - lastTransitionTime: fake
+        message: Successfully accepted AgentgatewayModel
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: fake
+        message: ""
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      controllerName: agentgateway.dev/agentgateway
+      parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: grpc-routing
+        namespace: default
+        sectionName: llm
+- apiVersion: agentgateway.dev/v1alpha1
+  kind: AgentgatewayModel
+  metadata:
+    name: premium-model
+    namespace: default
+  spec: null
+  status:
+    parents:
+    - conditions:
+      - lastTransitionTime: fake
+        message: Successfully accepted AgentgatewayModel
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: fake
+        message: ""
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      controllerName: agentgateway.dev/agentgateway
+      parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: grpc-routing
+        namespace: default
+        sectionName: llm
+- apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: grpc-routing
+    namespace: default
+  spec: null
+  status:
+    attachedListenerSets: 0
+    conditions:
+    - lastTransitionTime: fake
+      message: ""
+      reason: Accepted
+      status: "True"
+      type: Accepted
+    - lastTransitionTime: fake
+      message: Successfully programmed Gateway
+      reason: Programmed
+      status: "True"
+      type: Programmed
+    listeners:
+    - attachedRoutes: 4
+      conditions:
+      - lastTransitionTime: fake
+        message: No errors found
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: fake
+        message: No errors found
+        reason: NoConflicts
+        status: "False"
+        type: Conflicted
+      - lastTransitionTime: fake
+        message: No errors found
+        reason: Programmed
+        status: "True"
+        type: Programmed
+      - lastTransitionTime: fake
+        message: No errors found
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      name: llm
+      supportedKinds:
+      - group: agentgateway.dev
+        kind: AgentgatewayModel

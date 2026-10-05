@@ -2140,6 +2140,17 @@ func (this *ModelRoute_VirtualModel_Failover) UnmarshalJSON(b []byte) error {
 	return ResourceUnmarshaler.Unmarshal(bytes.NewReader(b), this)
 }
 
+// MarshalJSON is a custom marshaler for ModelRoute_VirtualModel_GrpcCallout
+func (this *ModelRoute_VirtualModel_GrpcCallout) MarshalJSON() ([]byte, error) {
+	str, err := ResourceMarshaler.MarshalToString(this)
+	return []byte(str), err
+}
+
+// UnmarshalJSON is a custom unmarshaler for ModelRoute_VirtualModel_GrpcCallout
+func (this *ModelRoute_VirtualModel_GrpcCallout) UnmarshalJSON(b []byte) error {
+	return ResourceUnmarshaler.Unmarshal(bytes.NewReader(b), this)
+}
+
 // MarshalJSON is a custom marshaler for ModelRoute_VirtualModel_Callout
 func (this *ModelRoute_VirtualModel_Callout) MarshalJSON() ([]byte, error) {
 	str, err := ResourceMarshaler.MarshalToString(this)

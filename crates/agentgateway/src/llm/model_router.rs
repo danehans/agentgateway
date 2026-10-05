@@ -174,6 +174,7 @@ pub enum VirtualModelRouting {
 	Failover { backend: RouteBackendReference },
 	Conditional(Vec<ConditionalTarget>),
 	Callout(Arc<llm::router_callout::VirtualModelCallout>),
+	GrpcCallout(Arc<llm::router_grpc::GrpcCallout>),
 }
 
 /// The model name the client asked for, before any virtual model rewrite. The router stores it as
@@ -481,6 +482,47 @@ impl ModelRouter {
 							),
 							"virtual_model_no_matching_target",
 						));
+					},
+				}
+			},
+			VirtualModelRouting::GrpcCallout(callout) => {
+				// A missing parsed body must not silently invoke a fallback for
+				// unsupported APIs such as path-based or multipart requests.
+				if !matches!(
+					req.uri().path(),
+					"/v1/chat/completions" | "/chat/completions"
+				) {
+					return ResolveResult::DirectResponse(llm_error_response(
+						::http::StatusCode::BAD_REQUEST,
+						"gRPC routing supports Chat Completions only",
+						"unsupported_routing_api",
+					));
+				}
+				match callout
+					.select(client, req, location.llm_request(), &virtual_model.name)
+					.await
+				{
+					Ok(llm::router_grpc::Outcome::Selected(model)) => (model, false),
+					Ok(llm::router_grpc::Outcome::Rejected(r)) => {
+						return ResolveResult::DirectResponse(llm_error_response(
+							::http::StatusCode::from_u16(r.http_status as u16).expect("validated status"),
+							&r.message,
+							&r.code,
+						));
+					},
+					Err(err) => {
+						tracing::debug!(virtual_model = %virtual_model.name, %err, "gRPC model callout failed");
+						callout.record_failure(req);
+						match &callout.failure_mode {
+							VirtualModelCalloutFailureMode::Fallback(model) => (model.clone(), false),
+							VirtualModelCalloutFailureMode::FailClosed => {
+								return ResolveResult::DirectResponse(llm_error_response(
+									::http::StatusCode::SERVICE_UNAVAILABLE,
+									"Model router unavailable or invalid response",
+									"virtual_model_callout_failed",
+								));
+							},
+						}
 					},
 				}
 			},
@@ -1149,6 +1191,171 @@ mod tests {
 			.extensions()
 			.get::<OriginalModel>()
 			.map(|model| model.0.as_str())
+	}
+
+	#[tokio::test]
+	async fn grpc_callout_virtual_model() {
+		let server = llm::router_grpc::tests::start().await;
+		let model = |name: &str| ModelRoute {
+			discovery: None,
+			id: None,
+			name: name.into(),
+			created: 0,
+			visibility: ModelVisibility::Internal,
+			header_matches: vec![],
+			backend: RouteBackendReference {
+				weight: 1,
+				target: RouteBackendTarget::Invalid,
+				inline_policies: vec![],
+			},
+			policies: ModelRoutePolicies {
+				passthrough: None,
+				llm: Arc::default(),
+				authorization: Some(Authorization(Arc::new(
+					crate::http::authorization::RuleSet::new(crate::http::authorization::PolicySet::new(
+						vec![Arc::new(
+							cel::Expression::new_strict("request.headers['x-model-access'] == 'allowed'")
+								.unwrap(),
+						)],
+						vec![],
+						vec![],
+					)),
+				))),
+			},
+			backend_policies: vec![],
+		};
+		let names = [
+			"auto",
+			"unavailable",
+			"closed",
+			"reject",
+			"reject-unavailable",
+			"deadline",
+			"missing",
+			"outside",
+			"generation",
+			"oversized",
+		];
+		let virtuals = names
+			.iter()
+			.map(|name| {
+				let mut config: llm::router_grpc::GrpcCallout = serde_json::from_value(serde_json::json!({
+						"host": server.address.to_string(),
+						"candidates": ["economy-model", "premium-model"],
+						"context": {"tenant": "'acme'", "session": "request.headers['x-session']"},
+						"policyGeneration": "v1",
+						"timeoutMs": 1000,
+						"failureMode": {"fallback": "economy-model"},
+				}))
+				.unwrap();
+				if *name == "closed" {
+					config.failure_mode = VirtualModelCalloutFailureMode::FailClosed;
+				}
+				if *name == "deadline" {
+					config.timeout_ms = 50;
+				}
+				VirtualModelRoute {
+					name: (*name).into(),
+					created: 0,
+					llm_policy: Arc::default(),
+					routing: VirtualModelRouting::GrpcCallout(Arc::new(config)),
+				}
+			})
+			.collect();
+		let router = ModelRouter::new(
+			vec![model("economy-model"), model("premium-model")],
+			virtuals,
+		);
+		let client = crate::test_helpers::policy_client();
+		let resolve = async |model: &str, path: &str, access: &str| {
+			let mut req = ::http::Request::builder()
+				.uri(format!("http://example.com{path}"))
+				.header("x-session", model)
+				.header("x-model-access", access)
+				.body(http::Body::from(
+					serde_json::json!({
+							"model": model, "messages": [{"role":"user", "content":"hello"}],
+							"stream": true, "temperature": 0.7, "vendor_extension": {"custom": 42}
+					})
+					.to_string(),
+				))
+				.unwrap();
+			let result = router
+				.resolve(&mut req, &llm::catalog::ModelCatalog::default(), &client)
+				.await;
+			(result, req)
+		};
+		// A real HTTP/2 gRPC exchange, followed by normal model resolution.
+		let (result, req) = resolve("auto", "/v1/chat/completions", "allowed").await;
+		assert!(matches!(result, ResolveResult::Backend(_)));
+		assert_eq!(original_model(&req), Some("auto"));
+		let metadata = &req
+			.extensions()
+			.get::<http::transformation_cel::TransformationMetadata>()
+			.unwrap()
+			.0;
+		assert_eq!(metadata["grpc_router"]["diagnostics"]["reason"], "test");
+		let body: Value = serde_json::from_slice(
+			&http::read_body_with_limit(req.into_body(), 4096)
+				.await
+				.unwrap(),
+		)
+		.unwrap();
+		assert_eq!(body["model"], "premium-model");
+		assert_eq!(body["stream"], true);
+		assert_eq!(body["vendor_extension"]["custom"], 42);
+		assert!(body.get("grpc_router").is_none());
+		let sent = server.requests.lock().unwrap()[0].clone();
+		assert_eq!(sent.requested_model, "auto");
+		assert_eq!(sent.input_format, "openai_chat");
+		assert_eq!(sent.context["tenant"], "acme");
+		assert_eq!(sent.context["session"], "auto");
+		assert!(!sent.request_id.is_empty());
+		assert_eq!(
+			serde_json::from_slice::<Value>(&sent.request_json).unwrap()["vendor_extension"]["custom"],
+			42
+		);
+
+		for name in ["unavailable", "deadline", "missing", "outside", "oversized"] {
+			let (result, req) = resolve(name, "/v1/chat/completions", "allowed").await;
+			assert!(matches!(result, ResolveResult::Backend(_)), "{name}");
+			assert_eq!(original_model(&req), Some(name));
+			assert_eq!(
+				req
+					.extensions()
+					.get::<http::transformation_cel::TransformationMetadata>()
+					.unwrap()
+					.0["grpc_router"]["action"],
+				"fallback"
+			);
+			let body: Value = serde_json::from_slice(
+				&http::read_body_with_limit(req.into_body(), 4096)
+					.await
+					.unwrap(),
+			)
+			.unwrap();
+			assert_eq!(body["model"], "economy-model", "{name}");
+		}
+		for (name, access, status) in [
+			("reject", "allowed", 409),
+			("generation", "allowed", 409),
+			("reject-unavailable", "allowed", 503),
+			("closed", "allowed", 503),
+			("auto", "denied", 403),
+			("unavailable", "denied", 403),
+		] {
+			let (result, _) = resolve(name, "/v1/chat/completions", access).await;
+			let ResolveResult::DirectResponse(response) = result else {
+				panic!("expected rejection: {name}")
+			};
+			assert_eq!(response.status().as_u16(), status, "{name}");
+		}
+		let count = server.requests.lock().unwrap().len();
+		let (result, _) = resolve("auto", "/v1/responses", "allowed").await;
+		assert!(matches!(result, ResolveResult::DirectResponse(r) if r.status().as_u16() == 400));
+		let (result, _) = resolve("premium-model", "/v1/chat/completions", "allowed").await;
+		assert!(matches!(result, ResolveResult::DirectResponse(_))); // internal model cannot be requested directly
+		assert_eq!(server.requests.lock().unwrap().len(), count);
 	}
 
 	#[tokio::test]

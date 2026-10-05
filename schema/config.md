@@ -5882,6 +5882,19 @@
 |`llm.virtualModels[].routing.callout.cache.key`|[]string|CEL expressions that make up the cache key. Empty keys are accepted, but do not produce cache hits.|
 |`llm.virtualModels[].routing.callout.cache.ttl`|string|CEL expression that returns how long cached results are reused.<br>Must return either a duration or timestamp.|
 |`llm.virtualModels[].routing.callout.cache.maxEntries`|integer|Maximum number of results to keep in the cache.|
+|`llm.virtualModels[].routing.grpcCallout`|object|Select a model using the typed agentgateway.dev.router.v1.ModelRouter gRPC API.|
+|`llm.virtualModels[].routing.grpcCallout.service`|object|Service reference. Service must be defined in the top level services list.|
+|`llm.virtualModels[].routing.grpcCallout.service.name`|string|Name of the target Service, as defined in the top-level `services` list.|
+|`llm.virtualModels[].routing.grpcCallout.service.port`|integer|Port on the target Service to route to.|
+|`llm.virtualModels[].routing.grpcCallout.host`|string|Hostname or IP address|
+|`llm.virtualModels[].routing.grpcCallout.backend`|string|Explicit backend reference. Backend must be defined in the top level backends list|
+|`llm.virtualModels[].routing.grpcCallout.policies`|[`<BackendPolicies>`](#backendpolicies)|Backend policies used when connecting to the service.|
+|`llm.virtualModels[].routing.grpcCallout.candidates`|[]string|Exact concrete model names the router may return (1..128). Wildcards and<br>virtual targets are not allowed. Final model authorization still applies.|
+|`llm.virtualModels[].routing.grpcCallout.context`|object|CEL expressions producing strings sent as trusted routing context.<br>Authentication must establish any caller identity before this stage.|
+|`llm.virtualModels[].routing.grpcCallout.policyGeneration`|string|Version of the routing policy. The router must echo this exact value.|
+|`llm.virtualModels[].routing.grpcCallout.timeoutMs`|integer|Total routing RPC deadline in milliseconds, including response decoding.|
+|`llm.virtualModels[].routing.grpcCallout.failureMode`|object|Used for RPC/protocol failures only, never intentional router rejection.|
+|`llm.virtualModels[].routing.grpcCallout.failureMode.fallback`|string|Route to this model, which is resolved against llm.models, without applying `transformation`.|
 |`llm.policies`|object|policies defines policies for handling incoming requests, before a model is selected|
 |`llm.policies.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`llm.policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|

@@ -107,3 +107,9 @@ pub mod ateapi {
 pub mod credprovider {
 	tonic::include_proto!("credprovider");
 }
+
+#[allow(warnings)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+pub mod model_router {
+	tonic::include_proto!("agentgateway.dev.router.v1");
+}

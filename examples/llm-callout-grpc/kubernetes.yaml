@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-model-router
+  namespace: default
+spec:
+  selector:
+    app: grpc-model-router
+  ports:
+  - name: grpc
+    port: 50051
+    appProtocol: kubernetes.io/h2c
+  - name: inference
+    port: 3001
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: grpc-routing
+  namespace: default
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+  - name: llm
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      kinds:
+      - group: agentgateway.dev
+        kind: AgentgatewayModel
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: economy-model
+  namespace: default
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: grpc-routing
+    sectionName: llm
+  visibility: Internal
+  provider: OpenAI
+  baseURL: http://grpc-model-router.default.svc.cluster.local:3001/v1
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: premium-model
+  namespace: default
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: grpc-routing
+    sectionName: llm
+  visibility: Internal
+  provider: OpenAI
+  baseURL: http://grpc-model-router.default.svc.cluster.local:3001/v1
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: auto
+  namespace: default
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: grpc-routing
+    sectionName: llm
+  virtualModel:
+    grpcCallout:
+      backendRef:
+        name: grpc-model-router
+        port: 50051
+      candidates:
+      - modelRef:
+          name: economy-model
+      - modelRef:
+          name: premium-model
+      policyGeneration: demo-v1
+      timeoutMs: 2000
+      context:
+        tenant: "'demo'"
+      fallback:
+        modelRef:
+          name: economy-model

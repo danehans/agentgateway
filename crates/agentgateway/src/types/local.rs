@@ -548,6 +548,9 @@ pub struct LocalLLMVirtualModelRouting {
 	/// callout selects the target model by calling an external HTTP service.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	callout: Option<llm::router_callout::VirtualModelCallout>,
+	/// Select a model using the typed agentgateway.dev.router.v1.ModelRouter gRPC API.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	grpc_callout: Option<llm::router_grpc::GrpcCallout>,
 }
 
 #[apply(schema_de!)]
@@ -4228,6 +4231,7 @@ enum LocalLLMVirtualRoutingStrategy<'a> {
 	Failover(&'a LocalLLMFailoverRouting),
 	Conditional(&'a LocalLLMConditionalRouting),
 	Callout(&'a llm::router_callout::VirtualModelCallout),
+	GrpcCallout(&'a llm::router_grpc::GrpcCallout),
 }
 
 fn llm_model_matches(pattern: &str, model: &str) -> anyhow::Result<bool> {
@@ -4259,6 +4263,7 @@ impl<'a> LocalLLMVirtualRoutingStrategy<'a> {
 					.iter()
 					.map(|target| target.model.as_str()),
 			),
+			Self::GrpcCallout(callout) => Box::new(callout.candidates.iter().map(String::as_str)),
 			Self::Callout(callout) => Box::new(
 				match &callout.failure_mode {
 					VirtualModelCalloutFailureMode::Fallback(model) => Some(model.as_str()),
@@ -4275,7 +4280,8 @@ impl LocalLLMVirtualModel {
 		let strategy_count = usize::from(self.routing.weighted.is_some())
 			+ usize::from(self.routing.failover.is_some())
 			+ usize::from(self.routing.conditional.is_some())
-			+ usize::from(self.routing.callout.is_some());
+			+ usize::from(self.routing.callout.is_some())
+			+ usize::from(self.routing.grpc_callout.is_some());
 		if strategy_count != 1 {
 			bail!(
 				"virtual model {} must specify exactly one routing strategy",
@@ -4301,6 +4307,10 @@ impl LocalLLMVirtualModel {
 				);
 			}
 			return Ok(LocalLLMVirtualRoutingStrategy::Conditional(conditional));
+		}
+		if let Some(callout) = self.routing.grpc_callout.as_ref() {
+			callout.validate()?;
+			return Ok(LocalLLMVirtualRoutingStrategy::GrpcCallout(callout));
 		}
 		if let Some(callout) = self.routing.callout.as_ref() {
 			if !callout.transformation.contains_key("model") {
@@ -4838,6 +4848,9 @@ async fn convert_llm_config(
 						})
 						.collect(),
 				)
+			},
+			LocalLLMVirtualRoutingStrategy::GrpcCallout(callout) => {
+				llm::model_router::VirtualModelRouting::GrpcCallout(Arc::new(callout.clone()))
 			},
 			LocalLLMVirtualRoutingStrategy::Callout(callout) => {
 				if let VirtualModelCalloutFailureMode::Fallback(model) = &callout.failure_mode {

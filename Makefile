@@ -143,7 +143,7 @@ generate-schema:
 # Code generation for xds apis
 .PHONY: generate-apis
 generate-apis:
-	@PATH="./common/tools:$(PATH)" buf generate --path crates/protos/proto/resource.proto --path crates/protos/proto/ext_mcp.proto
+	@PATH="./common/tools:$(PATH)" buf generate --path crates/protos/proto/resource.proto --path crates/protos/proto/ext_mcp.proto --path crates/protos/proto/model_router.proto
 
 .PHONY: run-validation-deps
 run-validation-deps:

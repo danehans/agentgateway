@@ -206,3 +206,24 @@ spec:
     guardrail:
       identifier: test-guardrail
       version: "1"
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata:
+  name: grpc-router
+spec:
+  parentRefs:
+  - name: ai-gateway
+    sectionName: llm
+  virtualModel:
+    grpcCallout:
+      backendRef:
+        name: router
+        port: 50051
+      candidates:
+      - modelRef:
+          name: concrete-model
+      timeoutMs: 1000
+      policyGeneration: v1
+      context:
+        tenant: "'demo'"
