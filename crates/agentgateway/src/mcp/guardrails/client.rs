@@ -44,6 +44,7 @@ pub(crate) async fn check_request<P: serde::de::DeserializeOwned>(
 	let metadata_context = build_metadata(&remote.metadata, req_ctx);
 	let headers = collect_headers(&remote.request_headers, &req_ctx.request);
 	let req = McpRequest {
+		invocation_id: req_ctx.invocation_id.to_string(),
 		service_names: backends.to_vec(),
 		method: method.to_string(),
 		metadata_context,
@@ -219,6 +220,7 @@ pub(crate) async fn check_response(
 		.then(|| build_metadata(&remote.metadata, req_ctx))
 		.flatten();
 	let req = McpResponse {
+		invocation_id: req_ctx.invocation_id.to_string(),
 		service_names: backends.to_vec(),
 		method: method.to_string(),
 		metadata_context,

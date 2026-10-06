@@ -89,7 +89,13 @@ type McpRequest struct {
 	// Incoming HTTP request headers carrying this MCP call, after gateway-side
 	// allow/deny filtering. Multi-value headers appear as repeated entries with
 	// the same key. Empty for stdio upstreams.
-	Headers       []*McpHeader `protobuf:"bytes,5,rep,name=headers,proto3" json:"headers,omitempty"`
+	Headers []*McpHeader `protobuf:"bytes,5,rep,name=headers,proto3" json:"headers,omitempty"`
+	// Opaque gateway-generated identity for this invocation. Shared by request and
+	// response hooks and all processors, independent of client headers, session
+	// identifiers and JSON-RPC IDs. New client invocations receive new IDs.
+	// Older gateways omit this field; consumers requiring correlation must reject
+	// an empty value rather than substituting client-controlled identity.
+	InvocationId  string `protobuf:"bytes,6,opt,name=invocation_id,json=invocationId,proto3" json:"invocation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -159,6 +165,13 @@ func (x *McpRequest) GetHeaders() []*McpHeader {
 	return nil
 }
 
+func (x *McpRequest) GetInvocationId() string {
+	if x != nil {
+		return x.InvocationId
+	}
+	return ""
+}
+
 type McpResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Backend names this call targets, in their native (unmuxed) namespace.
@@ -168,7 +181,9 @@ type McpResponse struct {
 	Method          string           `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`
 	MetadataContext *structpb.Struct `protobuf:"bytes,3,opt,name=metadata_context,json=metadataContext,proto3" json:"metadata_context,omitempty"`
 	// JSON-RPC `result` from upstream as raw JSON bytes. Errors skip this hook.
-	McpResponse   []byte `protobuf:"bytes,4,opt,name=mcp_response,json=mcpResponse,proto3" json:"mcp_response,omitempty"`
+	McpResponse []byte `protobuf:"bytes,4,opt,name=mcp_response,json=mcpResponse,proto3" json:"mcp_response,omitempty"`
+	// Same gateway-generated invocation identity as McpRequest.invocation_id.
+	InvocationId  string `protobuf:"bytes,5,opt,name=invocation_id,json=invocationId,proto3" json:"invocation_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -229,6 +244,13 @@ func (x *McpResponse) GetMcpResponse() []byte {
 		return x.McpResponse
 	}
 	return nil
+}
+
+func (x *McpResponse) GetInvocationId() string {
+	if x != nil {
+		return x.InvocationId
+	}
+	return ""
 }
 
 type McpRequestResult struct {
@@ -663,7 +685,7 @@ var File_ext_mcp_proto protoreflect.FileDescriptor
 
 const file_ext_mcp_proto_rawDesc = "" +
 	"\n" +
-	"\rext_mcp.proto\x12\x18agentgateway.dev.ext_mcp\x1a\x1cgoogle/protobuf/struct.proto\"\x82\x02\n" +
+	"\rext_mcp.proto\x12\x18agentgateway.dev.ext_mcp\x1a\x1cgoogle/protobuf/struct.proto\"\xa7\x02\n" +
 	"\n" +
 	"McpRequest\x12#\n" +
 	"\rservice_names\x18\x01 \x03(\tR\fserviceNames\x12\x16\n" +
@@ -671,13 +693,15 @@ const file_ext_mcp_proto_rawDesc = "" +
 	"\x10metadata_context\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x0fmetadataContext\x12$\n" +
 	"\vmcp_request\x18\x04 \x01(\fH\x00R\n" +
 	"mcpRequest\x88\x01\x01\x12=\n" +
-	"\aheaders\x18\x05 \x03(\v2#.agentgateway.dev.ext_mcp.McpHeaderR\aheadersB\x0e\n" +
-	"\f_mcp_request\"\xb1\x01\n" +
+	"\aheaders\x18\x05 \x03(\v2#.agentgateway.dev.ext_mcp.McpHeaderR\aheaders\x12#\n" +
+	"\rinvocation_id\x18\x06 \x01(\tR\finvocationIdB\x0e\n" +
+	"\f_mcp_request\"\xd6\x01\n" +
 	"\vMcpResponse\x12#\n" +
 	"\rservice_names\x18\x01 \x03(\tR\fserviceNames\x12\x16\n" +
 	"\x06method\x18\x02 \x01(\tR\x06method\x12B\n" +
 	"\x10metadata_context\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x0fmetadataContext\x12!\n" +
-	"\fmcp_response\x18\x04 \x01(\fR\vmcpResponse\"\xbc\x02\n" +
+	"\fmcp_response\x18\x04 \x01(\fR\vmcpResponse\x12#\n" +
+	"\rinvocation_id\x18\x05 \x01(\tR\finvocationId\"\xbc\x02\n" +
 	"\x10McpRequestResult\x124\n" +
 	"\x04pass\x18\x01 \x01(\v2\x1e.agentgateway.dev.ext_mcp.PassH\x00R\x04pass\x12\x1a\n" +
 	"\amutated\x18\x02 \x01(\fH\x00R\amutated\x12D\n" +

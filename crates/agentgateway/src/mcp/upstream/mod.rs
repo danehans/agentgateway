@@ -34,6 +34,9 @@ use crate::*;
 
 #[derive(Debug, Clone)]
 pub struct IncomingRequestContext {
+	/// Generated once for the incoming invocation; clones and guardrail retries
+	/// preserve it. Never derived from a client header or JSON-RPC/session ID.
+	pub(crate) invocation_id: uuid::Uuid,
 	/// Incoming HTTP body exposed as CEL request.body and request.bodyPrefix after
 	/// parsing. Kept separate from the MCP message, which may be rewritten for upstreams.
 	/// None means this context was created from headers alone (e.g. session cleanup).
@@ -49,6 +52,7 @@ impl IncomingRequestContext {
 	pub fn new(parts: &::http::request::Parts) -> Self {
 		Self {
 			request: ::http::Request::from_parts(parts.clone(), None),
+			invocation_id: uuid::Uuid::new_v4(),
 			authority: parts.uri.authority().cloned(),
 		}
 	}
@@ -790,6 +794,23 @@ mod tests {
 			serde_json::json!({"y": true}).as_object()
 		);
 		assert!(merge_extension_capabilities(std::iter::empty()).is_none());
+	}
+
+	#[test]
+	fn invocation_identity_is_generated_and_preserved_only_by_cloning() {
+		let parts = ::http::Request::builder()
+			.header("x-request-id", "client-controlled")
+			.header("mcp-session-id", "client-controlled")
+			.body(())
+			.unwrap()
+			.into_parts()
+			.0;
+		let first = IncomingRequestContext::new(&parts);
+		let cloned = first.clone().with_mcp_target("backend");
+		assert_eq!(first.invocation_id, cloned.invocation_id);
+		let second = IncomingRequestContext::new(&parts);
+		assert_ne!(first.invocation_id, second.invocation_id);
+		assert!(!first.invocation_id.is_nil());
 	}
 
 	#[test]

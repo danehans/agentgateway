@@ -8857,3 +8857,62 @@ async fn modern_multi_target_resolve_propagates_meta() {
 		assert_eq!(&probe["params"]["_meta"][key], value, "{key}");
 	}
 }
+
+#[tokio::test]
+async fn mcp_guardrails_invocation_identity_pairs_hooks_and_separates_calls() {
+	use std::sync::Mutex as StdMutex;
+
+	use crate::test_helpers::extmcpmock::{closure_mock, pass_request, pass_response};
+	let requests = Arc::new(StdMutex::new(Vec::new()));
+	let responses = Arc::new(StdMutex::new(Vec::new()));
+	let mock = {
+		let requests = requests.clone();
+		let responses = responses.clone();
+		closure_mock(
+			move |req| {
+				if req.method == "tools/call" {
+					requests.lock().unwrap().push(req.invocation_id.clone());
+				}
+				pass_request()
+			},
+			move |resp| {
+				if resp.method == "tools/call" {
+					responses.lock().unwrap().push(resp.invocation_id.clone());
+				}
+				pass_response()
+			},
+		)
+		.spawn()
+		.await
+	};
+	let server = mock_streamable_http_server(true).await;
+	let (_bind, io) = setup_proxy_policies(
+		&server,
+		true,
+		false,
+		vec![guardrails_test_support::policy(mock.address)],
+	)
+	.await;
+	let client = mcp_streamable_client(io).await;
+	for _ in 0..2 {
+		client
+			.call_tool(
+				rmcp::model::CallToolRequestParams::new("echo").with_arguments(
+					serde_json::json!({"synthetic":"same-arguments"})
+						.as_object()
+						.cloned()
+						.unwrap(),
+				),
+			)
+			.await
+			.expect("tool invocation succeeds");
+	}
+	let requests = requests.lock().unwrap();
+	let responses = responses.lock().unwrap();
+	assert_eq!(requests.len(), 2);
+	assert_eq!(*requests, *responses);
+	assert_ne!(requests[0], requests[1]);
+	for value in requests.iter() {
+		assert!(!uuid::Uuid::parse_str(value).unwrap().is_nil());
+	}
+}

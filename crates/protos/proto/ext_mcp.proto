@@ -29,6 +29,12 @@ message McpRequest {
   // allow/deny filtering. Multi-value headers appear as repeated entries with
   // the same key. Empty for stdio upstreams.
   repeated McpHeader headers = 5;
+  // Opaque gateway-generated identity for this invocation. Shared by request and
+  // response hooks and all processors, independent of client headers, session
+  // identifiers and JSON-RPC IDs. New client invocations receive new IDs.
+  // Older gateways omit this field; consumers requiring correlation must reject
+  // an empty value rather than substituting client-controlled identity.
+  string invocation_id = 6;
 }
 
 message McpResponse {
@@ -40,6 +46,8 @@ message McpResponse {
   google.protobuf.Struct metadata_context = 3;
   // JSON-RPC `result` from upstream as raw JSON bytes. Errors skip this hook.
   bytes mcp_response = 4;
+  // Same gateway-generated invocation identity as McpRequest.invocation_id.
+  string invocation_id = 5;
 }
 
 message McpRequestResult {
