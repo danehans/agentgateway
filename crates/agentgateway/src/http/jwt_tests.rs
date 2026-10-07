@@ -1223,3 +1223,63 @@ pub fn test_required_claims_with_nbf_rejects_missing_nbf() {
 		"required_claims with nbf should reject tokens missing nbf claim"
 	);
 }
+
+#[test]
+fn test_public_validation_dump_tracks_applied_security_constraints() {
+	let key = json!({"kty":"EC","kid":"same-id","crv":"P-256","alg":"ES256",
+		"x":"WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk",
+		"y":"xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"});
+	let build = |key: serde_json::Value, audiences, required_claims| {
+		Provider::from_jwks(
+			serde_json::from_value(json!({"keys":[key]})).unwrap(),
+			"https://example.com".into(),
+			audiences,
+			JWTValidationOptions { required_claims },
+		)
+		.unwrap()
+	};
+	let p = build(
+		key.clone(),
+		Some(vec!["z".into(), "a".into()]),
+		HashSet::from(["sub".into(), "exp".into()]),
+	);
+	let dump = serde_json::to_value(&p).unwrap();
+	assert_eq!(dump["validationSummaryVersion"], 1);
+	assert_eq!(dump["keys"], json!(["same-id"]));
+	let applied = &dump["validation"]["same-id"];
+	assert_eq!(applied["audiences"], json!(["a", "z"]));
+	assert_eq!(
+		applied["requiredClaims"],
+		json!(["aud", "exp", "iss", "sub"])
+	);
+	assert_eq!(applied["algorithms"], json!(["ES256"]));
+	assert_eq!(applied["issuers"], json!(["https://example.com"]));
+	assert_eq!(applied["validateExp"], true);
+	assert_eq!(applied["validateNbf"], true);
+	assert_eq!(applied["validateAud"], true);
+	assert_eq!(applied["publicKeySha256"].as_str().unwrap().len(), 64);
+	assert_eq!(
+		applied["publicKeySha256"],
+		"2ff287327f3f327b6a15a6c7b8293c4bde468f702802e207f71ec224801623e2"
+	);
+	let weak = serde_json::to_value(build(key.clone(), None, HashSet::new())).unwrap();
+	assert_ne!(dump, weak);
+	assert_eq!(weak["validation"]["same-id"]["validateAud"], false);
+	let mut changed = key;
+	changed["y"] = json!("WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk");
+	let changed = serde_json::to_value(build(
+		changed,
+		Some(vec!["z".into(), "a".into()]),
+		HashSet::from(["sub".into(), "exp".into()]),
+	))
+	.unwrap();
+	assert_ne!(
+		applied["publicKeySha256"],
+		changed["validation"]["same-id"]["publicKeySha256"]
+	);
+	let raw = serde_json::to_string(&dump).unwrap();
+	for field in ["decoding", "private", "WM7ud", "xc7T4", "\"x\"", "\"y\""] {
+		assert!(!raw.contains(field));
+	}
+	assert_eq!(dump, serde_json::to_value(&p).unwrap());
+}

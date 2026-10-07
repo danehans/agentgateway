@@ -1,5 +1,5 @@
 // Inspired by https://github.com/cdriehuys/axum-jwks/blob/main/axum-jwks/src/jwks.rs (MIT license)
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 
 use ::cel::types::dynamic::DynamicType;
@@ -116,10 +116,21 @@ impl serde::Serialize for Provider {
 		pub struct Serde<'a> {
 			issuer: &'a str,
 			keys: Vec<&'a str>,
+			#[serde(rename = "validationSummaryVersion")]
+			validation_summary_version: u32,
+			validation: BTreeMap<&'a str, PublicValidation<'a>>,
 		}
+		let mut keys = self.keys.keys().map(|x| x.as_str()).collect::<Vec<_>>();
+		keys.sort_unstable();
 		Serde {
 			issuer: &self.issuer,
-			keys: self.keys.keys().map(|x| x.as_str()).collect::<Vec<_>>(),
+			keys,
+			validation_summary_version: 1,
+			validation: self
+				.keys
+				.iter()
+				.map(|(id, key)| (id.as_str(), PublicValidation::from(key)))
+				.collect(),
 		}
 		.serialize(serializer)
 	}
@@ -420,6 +431,7 @@ impl Provider {
 					},
 				};
 
+			let public_key_sha256 = public_key_digest(&jwk.algorithm)?;
 			let supported_algorithms = match to_supported_alg(jwk.common.key_algorithm) {
 				None => {
 					// If they did not explicitly set the key algorithm, which is optional, then we can infer it
@@ -472,6 +484,7 @@ impl Provider {
 				Jwk {
 					decoding: decoding_key,
 					validation,
+					public_key_sha256,
 				},
 			);
 		}
@@ -500,6 +513,87 @@ impl Jwt {
 struct Jwk {
 	decoding: DecodingKey,
 	validation: Validation,
+	public_key_sha256: String,
+}
+
+/// RFC 7638 public JWK thumbprint, hex-encoded. No decoding/private key bytes
+/// enter the public admin dump. A stable kid alone cannot attest a signing key.
+fn public_key_digest(algorithm: &AlgorithmParameters) -> Result<String, JwkError> {
+	let value = match algorithm {
+		AlgorithmParameters::RSA(key) => serde_json::json!({"e": key.e, "kty": "RSA", "n": key.n}),
+		AlgorithmParameters::EllipticCurve(key) => {
+			serde_json::json!({"crv": key.curve, "kty": "EC", "x": key.x, "y": key.y})
+		},
+		AlgorithmParameters::OctetKeyPair(key) => {
+			serde_json::json!({"crv": key.curve, "kty": "OKP", "x": key.x})
+		},
+		other => {
+			return Err(JwkError::UnexpectedAlgorithm {
+				key_id: String::new(),
+				algorithm: other.clone(),
+			});
+		},
+	};
+	let sorted: BTreeMap<&String, &Value> = value.as_object().unwrap().iter().collect();
+	let raw = serde_json::to_vec(&sorted).expect("public JWK parameters serialize");
+	Ok(
+		crate::crypto::digest::sha256(&raw)
+			.iter()
+			.map(|b| format!("{b:02x}"))
+			.collect(),
+	)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicValidation<'a> {
+	public_key_sha256: &'a str,
+	algorithms: Vec<String>,
+	required_claims: Vec<&'a str>,
+	audiences: Vec<&'a str>,
+	issuers: Vec<&'a str>,
+	subject: Option<&'a str>,
+	validate_exp: bool,
+	validate_nbf: bool,
+	validate_aud: bool,
+	leeway_seconds: u64,
+	minimum_expiry_seconds: u64,
+}
+
+impl<'a> From<&'a Jwk> for PublicValidation<'a> {
+	fn from(key: &'a Jwk) -> Self {
+		let sorted = |set: &'a HashSet<String>| {
+			let mut values = set.iter().map(String::as_str).collect::<Vec<_>>();
+			values.sort_unstable();
+			values
+		};
+		let v = &key.validation;
+		let mut algorithms = v
+			.algorithms
+			.iter()
+			.map(|algorithm| {
+				serde_json::to_value(algorithm)
+					.expect("algorithm serializes")
+					.as_str()
+					.expect("algorithm name")
+					.to_owned()
+			})
+			.collect::<Vec<_>>();
+		algorithms.sort_unstable();
+		Self {
+			public_key_sha256: &key.public_key_sha256,
+			algorithms,
+			required_claims: sorted(&v.required_spec_claims),
+			audiences: v.aud.as_ref().map(sorted).unwrap_or_default(),
+			issuers: v.iss.as_ref().map(sorted).unwrap_or_default(),
+			subject: v.sub.as_deref(),
+			validate_exp: v.validate_exp,
+			validate_nbf: v.validate_nbf,
+			validate_aud: v.validate_aud,
+			leeway_seconds: v.leeway,
+			minimum_expiry_seconds: v.reject_tokens_expiring_in_less_than,
+		}
+	}
 }
 
 #[derive(serde::Deserialize)]
