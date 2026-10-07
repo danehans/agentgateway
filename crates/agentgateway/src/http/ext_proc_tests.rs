@@ -6134,3 +6134,29 @@ mod metadata_context_and_attributes {
 		}
 	}
 }
+
+#[test]
+fn gateway_process_metadata_uses_executing_process_for_both_stages() {
+	let cfg = HashMap::from([(
+		"openshield".to_string(),
+		HashMap::from([(
+			"gateway_instance".to_string(),
+			Arc::new(crate::cel::Expression::new_strict("gatewayProcess.instanceId").unwrap()),
+		)]),
+	)]);
+	let mut req = http::Request::new(http::Body::from("{}"));
+	req
+		.headers_mut()
+		.insert("x-gateway-instance", "spoofed".parse().unwrap());
+	let snapshot = crate::cel::snapshot_request(&mut req, false);
+	let resp = http::Response::new(http::Body::from("{}"));
+	let expected = serde_json::to_value(crate::process_identity::GatewayProcess::default()).unwrap();
+	for exec in [
+		crate::cel::Executor::new_request(&req),
+		crate::cel::Executor::new_response(Some(&snapshot), &resp),
+	] {
+		let context = ext_proc::build_processing_metadata_context(&exec, Some(&cfg)).unwrap();
+		let json = serde_json::to_value(&context["openshield"]).unwrap();
+		assert_eq!(json["gateway_instance"], expected["instanceId"]);
+	}
+}

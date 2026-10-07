@@ -102,6 +102,7 @@ pub struct AdminService {
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDump {
+	gateway_process: crate::process_identity::GatewayProcess,
 	#[serde(flatten)]
 	stores: crate::store::Stores,
 	version: BuildInfo,
@@ -528,6 +529,7 @@ async fn handle_config_dump(
 	AxumState(state): AxumState<Arc<AdminState>>,
 ) -> Result<Response, AdminError> {
 	let dump = ConfigDump {
+		gateway_process: Default::default(),
 		stores: state.stores.clone(),
 		version: BuildInfo::new(),
 		config: state.config.clone(),

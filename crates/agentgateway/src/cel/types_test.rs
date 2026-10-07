@@ -747,3 +747,43 @@ fn test_source_connect_headers_sensitive_redacted_in_debug() {
 		"non-sensitive header should still be visible in Debug: {debug}"
 	);
 }
+
+#[test]
+fn gateway_process_is_immutable_across_client_and_snapshot_contexts() {
+	let expected = serde_json::to_value(crate::process_identity::GatewayProcess::default()).unwrap();
+	let id = uuid::Uuid::parse_str(expected["instanceId"].as_str().unwrap()).unwrap();
+	assert_eq!(id.get_version(), Some(uuid::Version::Random));
+	assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+	assert_eq!(expected["version"], 1);
+	let mut req = build_test_request();
+	req
+		.headers_mut()
+		.insert("x-gateway-process", "spoofed".parse().unwrap());
+	req
+		.extensions_mut()
+		.insert(json!({"gatewayProcess": {"instanceId": "spoofed"}}));
+	let snapshot = snapshot_request(&mut req, false);
+	let response = ::http::Response::new(Body::from("{}"));
+	let owned: ExecutorSerde = serde_json::from_value(json!({
+		"gatewayProcess": {"version": 1, "instanceId": "spoofed"}
+	}))
+	.unwrap();
+	assert_eq!(
+		serde_json::to_value(&owned).unwrap()["gatewayProcess"],
+		expected
+	);
+	for exec in [
+		Executor::new_empty(),
+		Executor::new_request(&req),
+		Executor::new_request_snapshot(Some(&snapshot)),
+		Executor::new_response(Some(&snapshot), &response),
+		owned.as_executor(),
+	] {
+		assert_eq!(exec_to_json(&exec)["gatewayProcess"], expected);
+		let expr = Expression::new_strict("gatewayProcess.instanceId").unwrap();
+		assert_eq!(
+			exec.eval(&expr).unwrap().json().unwrap(),
+			expected["instanceId"]
+		);
+	}
+}

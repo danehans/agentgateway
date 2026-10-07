@@ -404,6 +404,25 @@ mod tests {
 	use super::*;
 	use crate::mcp::guardrails::{McpGuardrailsDynamicMetadata, wire};
 
+	#[test]
+	fn gateway_process_metadata_survives_response_context_clone() {
+		let cfg = HashMap::from([(
+			"gateway_instance".to_string(),
+			Arc::new(cel::Expression::new_strict("gatewayProcess.instanceId").unwrap()),
+		)]);
+		let mut headers = ::http::HeaderMap::new();
+		headers.insert("x-gateway-instance", "spoofed".parse().unwrap());
+		let ctx = ctx_with_headers(headers);
+		let cloned = ctx.clone();
+		let expected =
+			serde_json::to_value(crate::process_identity::GatewayProcess::default()).unwrap();
+		for context in [&ctx, &cloned] {
+			let metadata = build_metadata(&cfg, context).unwrap();
+			let json = serde_json::to_value(metadata).unwrap();
+			assert_eq!(json["gateway_instance"], expected["instanceId"]);
+		}
+	}
+
 	fn struct_from_json(v: serde_json::Value) -> ProtoStruct {
 		serde_json::from_value(v).unwrap()
 	}

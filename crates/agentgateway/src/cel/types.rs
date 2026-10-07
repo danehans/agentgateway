@@ -39,6 +39,9 @@ use crate::{apply, llm};
 #[derive(Debug, Default, cel::DynamicType)]
 #[dynamic(rename_all = "camelCase")]
 pub struct Executor<'a> {
+	/// Read-only identity of the executing process, independent of client input.
+	pub gateway_process: crate::process_identity::GatewayProcess,
+
 	pub request: Option<RequestRef<'a>>,
 
 	pub response: Option<ResponseRef<'a>>,
@@ -2131,6 +2134,13 @@ where
 #[apply(schema!)]
 #[derive(Default)]
 pub struct ExecutorSerde {
+	/// Informational serialization only; input cannot replace the executing process.
+	#[serde(
+		default,
+		deserialize_with = "crate::process_identity::deserialize_current"
+	)]
+	pub gateway_process: crate::process_identity::GatewayProcess,
+
 	/// `request` contains attributes about the incoming HTTP request
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub request: Option<RequestRefSerde>,
@@ -2333,6 +2343,7 @@ pub fn full_example_executor() -> ExecutorSerde {
 	resp_headers.insert("content-type", "application/json".parse().unwrap());
 
 	ExecutorSerde {
+		gateway_process: Default::default(),
 		request: Some(RequestRefSerde {
 			method: Method::GET,
 			uri: "http://example.com/api/test?k=v".parse::<Uri>().unwrap(),

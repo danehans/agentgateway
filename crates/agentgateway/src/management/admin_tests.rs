@@ -73,3 +73,24 @@ async fn trace_sse_stream_does_not_repoll_after_eof() {
 	assert!(body.frame().await.is_none(), "stream should report EOF");
 	assert!(body.frame().await.is_none(), "stream must remain at EOF");
 }
+
+#[tokio::test]
+async fn admin_process_identity_matches_cel_and_survives_repeated_reads() {
+	let (addr, _drain_tx) = spawn_admin("config:\n  adminAddr: localhost:0\n").await;
+	let expected = serde_json::to_value(crate::process_identity::GatewayProcess::default()).unwrap();
+	for _ in 0..2 {
+		let dump: serde_json::Value = reqwest::get(format!("http://{addr}/config_dump"))
+			.await
+			.unwrap()
+			.json()
+			.await
+			.unwrap();
+		assert_eq!(dump["gatewayProcess"], expected);
+	}
+	let exec = crate::cel::Executor::new_empty();
+	let expr = crate::cel::Expression::new_strict("gatewayProcess.instanceId").unwrap();
+	assert_eq!(
+		exec.eval(&expr).unwrap().json().unwrap(),
+		expected["instanceId"]
+	);
+}
