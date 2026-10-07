@@ -4246,3 +4246,94 @@ fn query_requests_sse_matches_alt_query_parameter() {
 		"/v1beta/models/gemini-2.5-flash:streamGenerateContent?halt=sse"
 	)));
 }
+
+#[tokio::test]
+async fn buffered_native_response_rejects_plain_or_encoded_trailers() {
+	for encoding in [None, Some("gzip")] {
+		let plain = Bytes::from_static(br#"{"synthetic":"complete"}"#);
+		let wire = match encoding {
+			Some(encoding) => crate::http::compression::encode_body(&plain, encoding)
+				.await
+				.unwrap(),
+			None => plain,
+		};
+		let mut trailers = HeaderMap::new();
+		trailers.insert(
+			"x-synthetic-footer",
+			HeaderValue::from_static("synthetic-value-must-not-be-logged"),
+		);
+		let frames = futures_util::stream::iter([
+			Ok::<_, std::io::Error>(http_body::Frame::data(wire)),
+			Ok(http_body::Frame::trailers(trailers)),
+		]);
+		let mut response = ::http::Response::builder()
+			.header(header::CONTENT_TYPE, "application/json")
+			.body(Body::new(http_body_util::StreamBody::new(frames)))
+			.unwrap();
+		if let Some(encoding) = encoding {
+			response
+				.headers_mut()
+				.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+		}
+		match AIProvider::buffer_response(response).await {
+			Err(AIError::ResponseDecoding(error)) => {
+				assert!(
+					!error
+						.to_string()
+						.contains("synthetic-value-must-not-be-logged")
+				);
+			},
+			_ => panic!("buffered provider trailers were silently discarded"),
+		}
+	}
+}
+
+#[tokio::test]
+async fn buffered_native_response_preserves_wire_and_decoded_limits() {
+	for encoding in [None, Some("gzip")] {
+		for size in [64, 65] {
+			let plain = Bytes::from(vec![b'x'; size]);
+			let wire = match encoding {
+				Some(encoding) => crate::http::compression::encode_body(&plain, encoding)
+					.await
+					.unwrap(),
+				None => plain.clone(),
+			};
+			let mut response = ::http::Response::builder().body(Body::from(wire)).unwrap();
+			response.extensions_mut().insert(http::BufferLimit::new(64));
+			if let Some(encoding) = encoding {
+				response
+					.headers_mut()
+					.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+			}
+			let result = AIProvider::buffer_response(response).await;
+			if size == 64 {
+				assert_eq!(result.unwrap().bytes, plain);
+			} else {
+				assert!(matches!(result, Err(AIError::ResponseTooLarge)));
+			}
+		}
+	}
+}
+
+#[tokio::test]
+async fn buffered_native_response_preserves_absolute_deadline() {
+	let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+	let mut body = Body::from("synthetic");
+	body.set_deadline(deadline);
+	let response = ::http::Response::builder().body(body).unwrap();
+	assert!(matches!(
+		AIProvider::buffer_response(response).await,
+		Err(AIError::ResponseDecoding(_))
+	));
+
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+	let mut body = Body::from("synthetic");
+	body.set_deadline(deadline);
+	let collected = AIProvider::collect_native_response(body, 64).await.unwrap();
+	assert_eq!(collected.deadline(), Some(deadline));
+	assert_eq!(
+		collected.into_bytes(64).await.unwrap(),
+		Bytes::from_static(b"synthetic")
+	);
+}

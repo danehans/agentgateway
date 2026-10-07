@@ -2559,18 +2559,67 @@ impl AIProvider {
 		Ok(resp)
 	}
 
+	fn validate_native_response_deadline(
+		deadline: Option<tokio::time::Instant>,
+	) -> Result<(), AIError> {
+		if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+			return Err(AIError::ResponseDecoding(axum_core::Error::new(
+				std::io::Error::new(
+					std::io::ErrorKind::TimedOut,
+					"buffered provider response deadline expired",
+				),
+			)));
+		}
+		Ok(())
+	}
+
+	// Typed conversion must not silently erase an unsupported native footer.
+	async fn collect_native_response(body: Body, limit: usize) -> Result<Body, AIError> {
+		use http_body_util::BodyExt;
+		let deadline = body.deadline();
+		Self::validate_native_response_deadline(deadline)?;
+		let read = http_body_util::Limited::new(body.into_boxed(), limit).collect();
+		let collected = match deadline {
+			Some(deadline) => tokio::time::timeout_at(deadline, read)
+				.await
+				.map_err(|e| AIError::ResponseDecoding(axum_core::Error::new(e)))?,
+			None => read.await,
+		}
+		.map_err(|e| {
+			if e.is::<http_body_util::LengthLimitError>() {
+				AIError::ResponseTooLarge
+			} else {
+				AIError::ResponseDecoding(axum_core::Error::new(e))
+			}
+		})?;
+		Self::validate_native_response_deadline(deadline)?;
+		if collected.trailers().is_some() {
+			return Err(AIError::ResponseDecoding(axum_core::Error::new(
+				std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					"unsupported buffered provider response trailers",
+				),
+			)));
+		}
+		let mut body = Body::from(collected.to_bytes());
+		if let Some(deadline) = deadline {
+			body.set_deadline(deadline);
+		}
+		Ok(body)
+	}
+
 	async fn buffer_response(resp: Response) -> Result<BufferedResponse, AIError> {
 		let buffer_limit = http::response_buffer_limit(&resp);
 		let (mut parts, body) = resp.into_parts();
 		let mut managed_body = dtrace::TracingBody::maybe_wrap("llm raw response", body, buffer_limit);
 		let ce = parts.headers.typed_get::<ContentEncoding>();
-		let (encoding, bytes) = http::compression::to_bytes_with_decompression(
-			managed_body.take_content(),
-			ce.as_ref(),
-			buffer_limit,
-		)
-		.await
-		.map_err(|e| map_response_compression_error(e, &parts.headers))?;
+		let native = Self::collect_native_response(managed_body.take_content(), buffer_limit).await?;
+		let deadline = native.deadline();
+		let (encoding, bytes) =
+			http::compression::to_bytes_with_decompression(native, ce.as_ref(), buffer_limit)
+				.await
+				.map_err(|e| map_response_compression_error(e, &parts.headers))?;
+		Self::validate_native_response_deadline(deadline)?;
 
 		// From here until the final proxy response boundary, the body is plaintext and may be
 		// translated or replaced. Remove all headers that describe the upstream wire representation
