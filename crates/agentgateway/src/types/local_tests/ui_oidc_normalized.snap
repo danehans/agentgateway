@@ -1,5 +1,6 @@
 ---
 source: crates/agentgateway/src/types/local_tests.rs
+assertion_line: 487
 description: "Config normalization test for ui_oidc: YAML -> LocalConfig -> NormalizedLocalConfig -> YAML"
 ---
 binds:
@@ -44,6 +45,26 @@ listener_routes:
                     - issuer: "https://issuer.example.com"
                       keys:
                         - kid-1
+                      validationSummaryVersion: 1
+                      validation:
+                        kid-1:
+                          publicKeySha256: 2ff287327f3f327b6a15a6c7b8293c4bde468f702802e207f71ec224801623e2
+                          algorithms:
+                            - ES256
+                          requiredClaims:
+                            - aud
+                            - exp
+                            - iss
+                          audiences:
+                            - client-id
+                          issuers:
+                            - "https://issuer.example.com"
+                          subject: ~
+                          validateExp: true
+                          validateNbf: true
+                          validateAud: true
+                          leewaySeconds: 60
+                          minimumExpirySeconds: 0
                   location:
                     header:
                       name: authorization
