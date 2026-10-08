@@ -4930,6 +4930,30 @@
           "default": [
             "exp"
           ]
+        },
+        "expectedTokenType": {
+          "description": "Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxTokenLifetimeSeconds": {
+          "description": "Require integer `iat` and `exp`, no future issuance, no expiry leeway,\nand a positive lifetime at most this many seconds (1 to 86,400).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "requiredStringClaims": {
+          "description": "Application claims that must be nonempty strings of at most 512 UTF-8\nbytes without control characters. Values still require authorization policy.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

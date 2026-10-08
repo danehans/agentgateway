@@ -3187,7 +3187,7 @@ impl LocalMcpAuthentication {
 			issuer: self.issuer.clone(),
 			audiences: self.audiences.clone(),
 			jwks,
-			jwt_validation_options: self.jwt_validation_options.clone(),
+			jwt_validation_options: Box::new(self.jwt_validation_options.clone()),
 		})
 	}
 

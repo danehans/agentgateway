@@ -546,6 +546,17 @@ fn mcp_authorization_from_proto(
 	McpAuthorization::new(authorization::RuleSet::new(policy_set))
 }
 
+fn jwt_validation_options_from_proto(
+	vo: &proto::agent::JwtValidationOptions,
+) -> http::jwt::JWTValidationOptions {
+	http::jwt::JWTValidationOptions {
+		required_claims: vo.required_claims.iter().cloned().collect(),
+		expected_token_type: vo.expected_token_type.clone(),
+		max_token_lifetime_seconds: vo.max_token_lifetime_seconds,
+		required_string_claims: vo.required_string_claims.iter().cloned().collect(),
+	}
+}
+
 fn mcp_authentication_from_proto(
 	m: &proto::agent::backend_policy_spec::McpAuthentication,
 	diagnostics: &mut Diagnostics,
@@ -560,9 +571,7 @@ fn mcp_authentication_from_proto(
 	let jwt_validation_options = m
 		.jwt_validation_options
 		.as_ref()
-		.map(|vo| http::jwt::JWTValidationOptions {
-			required_claims: vo.required_claims.iter().cloned().collect(),
-		})
+		.map(jwt_validation_options_from_proto)
 		.unwrap_or_default();
 	let jwt_provider = jwt_provider_from_inline_jwks_or_warn(
 		diagnostics,
@@ -2704,9 +2713,7 @@ fn traffic_policy_from_proto(
 					let jwt_validation_options = p
 						.jwt_validation_options
 						.as_ref()
-						.map(|vo| http::jwt::JWTValidationOptions {
-							required_claims: vo.required_claims.iter().cloned().collect(),
-						})
+						.map(jwt_validation_options_from_proto)
 						.unwrap_or_default();
 					Ok(jwt_provider_from_inline_jwks_or_warn(
 						diagnostics,
@@ -4744,6 +4751,63 @@ mod tests {
 		let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
 		let s = URL_SAFE_NO_PAD.encode(b"sig");
 		format!("{h}.{p}.{s}")
+	}
+
+	#[test]
+	fn typed_jwt_profile_survives_traffic_and_mcp_xds_conversion() -> Result<(), ProtoError> {
+		use proto::agent::traffic_policy_spec as tps;
+		let options = proto::agent::JwtValidationOptions {
+			required_claims: vec![],
+			expected_token_type: Some("runtime-traffic+jwt".to_owned()),
+			max_token_lifetime_seconds: Some(300),
+			required_string_claims: vec!["workload_id".to_owned(), "execution_id".to_owned()],
+		};
+		let jwks = r#"{"keys":[{"use":"sig","kty":"EC","kid":"synthetic-key","crv":"P-256","alg":"ES256","x":"WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk","y":"xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"}]}"#;
+		let spec = proto::agent::TrafficPolicySpec {
+			kind: Some(tps::Kind::Jwt(tps::Jwt {
+				mode: tps::jwt::Mode::Strict as i32,
+				providers: vec![tps::JwtProvider {
+					issuer: "synthetic-issuer".into(),
+					audiences: vec!["synthetic-audience".into()],
+					jwks_source: Some(tps::jwt_provider::JwksSource::Inline(jwks.into())),
+					jwt_validation_options: Some(options.clone()),
+				}],
+				..Default::default()
+			})),
+			..Default::default()
+		};
+		let mut diagnostics = Diagnostics::default();
+		let TrafficPolicy::JwtAuth(policies) = traffic_policy_from_proto(&spec, &mut diagnostics)?
+		else {
+			panic!("expected JWT policy")
+		};
+		let traffic = &policies.iter().next().unwrap().pol.jwt;
+		let mcp = mcp_authentication_from_proto(
+			&proto::agent::backend_policy_spec::McpAuthentication {
+				issuer: "synthetic-issuer".into(),
+				audiences: vec!["synthetic-audience".into()],
+				jwks_inline: jwks.into(),
+				jwt_validation_options: Some(options),
+				..Default::default()
+			},
+			&mut diagnostics,
+		)?;
+		assert!(diagnostics.into_warnings().is_empty());
+		for jwt in [traffic, mcp.jwt_validator.as_ref()] {
+			let dump = serde_json::to_value(jwt).unwrap();
+			let provider = &dump["providers"][0];
+			assert_eq!(provider["validationSummaryVersion"], 2);
+			let applied = &provider["validation"]["synthetic-key"];
+			assert_eq!(applied["expectedTokenType"], "runtime-traffic+jwt");
+			assert_eq!(applied["maxTokenLifetimeSeconds"], 300);
+			assert_eq!(
+				applied["requiredStringClaims"],
+				json!(["execution_id", "workload_id"])
+			);
+			assert_eq!(applied["leewaySeconds"], 0);
+			assert_eq!(applied["requiredClaims"], json!(["aud", "exp", "iss"]));
+		}
+		Ok(())
 	}
 
 	#[test]

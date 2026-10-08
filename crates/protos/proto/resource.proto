@@ -968,6 +968,14 @@ message JWTValidationOptions {
   // Claims that must be present in the token before validation.
   // Defaults to ["exp"]. Use an empty list to require no claims.
   repeated string required_claims = 1;
+  // Exact case-sensitive JWT header typ. Omission retains legacy behavior.
+  optional string expected_token_type = 2;
+  // Require integer iat/exp, no future issuance or expiry leeway, and a
+  // positive lifetime no longer than this value (1 to 86400 seconds).
+  optional uint64 max_token_lifetime_seconds = 3;
+  // Nonempty application string claims, bounded to 512 bytes without controls.
+  // Authorization policy must separately check their values.
+  repeated string required_string_claims = 4;
 }
 
 message TrafficPolicySpec {

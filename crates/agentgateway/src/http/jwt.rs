@@ -34,15 +34,24 @@ pub enum TokenError {
 	#[error("the token header does not specify a `kid`")]
 	MissingKeyId,
 
-	#[error("token uses the unknown key {0:?}")]
+	#[error("token uses an unknown key")]
 	UnknownKeyId(String),
 
 	#[error("failed to strip validated credentials from the request: {0}")]
 	CredentialRemoval(String),
+
+	#[error("token type does not match the configured profile")]
+	TokenTypeMismatch,
+	#[error("token lifetime does not match the configured profile")]
+	TokenLifetimeInvalid,
+	#[error("token string claims do not match the configured profile")]
+	TokenStringClaimInvalid,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum JwkError {
+	#[error("invalid JWT validation profile")]
+	InvalidValidationProfile,
 	#[error("failed to load JWKS: {0}")]
 	JwkLoadError(anyhow::Error),
 	#[error("failed to parse JWKS: {0}")]
@@ -125,7 +134,11 @@ impl serde::Serialize for Provider {
 		Serde {
 			issuer: &self.issuer,
 			keys,
-			validation_summary_version: 1,
+			validation_summary_version: if self.keys.values().any(|key| key.profile.is_configured()) {
+				2
+			} else {
+				1
+			},
 			validation: self
 				.keys
 				.iter()
@@ -182,7 +195,7 @@ pub enum LocalJwtConfig {
 		jwks: serdes::FileInlineOrRemote,
 		/// Claim requirements to enforce after the token signature is verified.
 		#[cfg_attr(feature = "schema", schemars(default))]
-		jwt_validation_options: JWTValidationOptions,
+		jwt_validation_options: Box<JWTValidationOptions>,
 	},
 }
 
@@ -239,7 +252,7 @@ impl<'de> Deserialize<'de> for LocalJwtConfig {
 				issuer: config.issuer,
 				audiences: config.audiences,
 				jwks: config.jwks,
-				jwt_validation_options: config.jwt_validation_options,
+				jwt_validation_options: Box::new(config.jwt_validation_options),
 			})
 		}
 	}
@@ -297,6 +310,89 @@ pub struct JWTValidationOptions {
 	/// those implied by the configured issuer and audiences.
 	#[serde(default = "default_required_claims")]
 	pub required_claims: HashSet<String>,
+	/// Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub expected_token_type: Option<String>,
+	/// Require integer `iat` and `exp`, no future issuance, no expiry leeway,
+	/// and a positive lifetime at most this many seconds (1 to 86,400).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub max_token_lifetime_seconds: Option<u64>,
+	/// Application claims that must be nonempty strings of at most 512 UTF-8
+	/// bytes without control characters. Values still require authorization policy.
+	#[serde(default, skip_serializing_if = "HashSet::is_empty")]
+	pub required_string_claims: HashSet<String>,
+}
+
+impl JWTValidationOptions {
+	fn is_configured(&self) -> bool {
+		self.expected_token_type.is_some()
+			|| self.max_token_lifetime_seconds.is_some()
+			|| !self.required_string_claims.is_empty()
+	}
+
+	fn validate_configuration(&self) -> Result<(), JwkError> {
+		if self.expected_token_type.as_ref().is_some_and(|value| {
+			value.is_empty()
+				|| value.len() > 128
+				|| !value
+					.bytes()
+					.all(|byte| byte.is_ascii_alphanumeric() || b"._+/-".contains(&byte))
+		}) || self
+			.max_token_lifetime_seconds
+			.is_some_and(|value| !(1..=86_400).contains(&value))
+			|| self.required_string_claims.len() > 64
+			|| self.required_string_claims.iter().any(|value| {
+				value.is_empty()
+					|| value.len() > 128
+					|| !value.bytes().enumerate().all(|(index, byte)| {
+						byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+					})
+			}) {
+			return Err(JwkError::InvalidValidationProfile);
+		}
+		Ok(())
+	}
+
+	fn validate_token(
+		&self,
+		header: &jsonwebtoken::Header,
+		claims: &Map<String, Value>,
+		now: u64,
+	) -> Result<(), TokenError> {
+		if self
+			.expected_token_type
+			.as_deref()
+			.is_some_and(|expected| header.typ.as_deref() != Some(expected))
+		{
+			return Err(TokenError::TokenTypeMismatch);
+		}
+		if let Some(maximum) = self.max_token_lifetime_seconds {
+			let iat = claims
+				.get("iat")
+				.and_then(Value::as_u64)
+				.ok_or(TokenError::TokenLifetimeInvalid)?;
+			let exp = claims
+				.get("exp")
+				.and_then(Value::as_u64)
+				.ok_or(TokenError::TokenLifetimeInvalid)?;
+			let lifetime = exp
+				.checked_sub(iat)
+				.ok_or(TokenError::TokenLifetimeInvalid)?;
+			if iat > now || exp <= now || lifetime == 0 || lifetime > maximum {
+				return Err(TokenError::TokenLifetimeInvalid);
+			}
+		}
+		for name in &self.required_string_claims {
+			let value = claims
+				.get(name)
+				.and_then(Value::as_str)
+				.ok_or(TokenError::TokenStringClaimInvalid)?;
+			if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+				return Err(TokenError::TokenStringClaimInvalid);
+			}
+		}
+		Ok(())
+	}
 }
 
 fn default_required_claims() -> HashSet<String> {
@@ -323,6 +419,9 @@ impl Default for JWTValidationOptions {
 	fn default() -> Self {
 		Self {
 			required_claims: default_required_claims(),
+			expected_token_type: None,
+			max_token_lifetime_seconds: None,
+			required_string_claims: HashSet::new(),
 		}
 	}
 }
@@ -355,7 +454,7 @@ impl LocalJwtConfig {
 					issuer,
 					audiences,
 					jwks,
-					jwt_validation_options,
+					jwt_validation_options: *jwt_validation_options,
 				}],
 			),
 		};
@@ -386,6 +485,7 @@ impl Provider {
 		audiences: Option<Vec<String>>,
 		jwt_validation_options: JWTValidationOptions,
 	) -> Result<Provider, JwkError> {
+		jwt_validation_options.validate_configuration()?;
 		warn_unsupported_claims(&jwt_validation_options.required_claims);
 
 		let mut keys = HashMap::new();
@@ -464,12 +564,18 @@ impl Provider {
 			// The new() requires 1 algorithm, so just pass the first before we override it
 			let mut validation = Validation::new(*supported_algorithms.first().unwrap());
 			validation.validate_nbf = true;
+			if jwt_validation_options.max_token_lifetime_seconds.is_some() {
+				validation.leeway = 0;
+			}
 			validation.algorithms = supported_algorithms;
 			// Override required_spec_claims with the user-configured set. A configured
 			// issuer or audience also implies that the corresponding claim must exist;
 			// otherwise there is nothing to match against the configured value.
 			// validate_exp remains true, so exp is still validated if present.
 			validation.required_spec_claims = jwt_validation_options.required_claims.clone();
+			if jwt_validation_options.max_token_lifetime_seconds.is_some() {
+				validation.required_spec_claims.insert("exp".to_owned());
+			}
 			validation.set_issuer(std::slice::from_ref(&issuer));
 			validation.required_spec_claims.insert("iss".to_owned());
 			if let Some(audiences) = audiences.as_ref().filter(|audiences| !audiences.is_empty()) {
@@ -485,6 +591,7 @@ impl Provider {
 					decoding: decoding_key,
 					validation,
 					public_key_sha256,
+					profile: jwt_validation_options.clone(),
 				},
 			);
 		}
@@ -514,6 +621,7 @@ struct Jwk {
 	decoding: DecodingKey,
 	validation: Validation,
 	public_key_sha256: String,
+	profile: JWTValidationOptions,
 }
 
 /// RFC 7638 public JWK thumbprint, hex-encoded. No decoding/private key bytes
@@ -558,6 +666,12 @@ struct PublicValidation<'a> {
 	validate_aud: bool,
 	leeway_seconds: u64,
 	minimum_expiry_seconds: u64,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	expected_token_type: Option<&'a str>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	max_token_lifetime_seconds: Option<u64>,
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	required_string_claims: Vec<&'a str>,
 }
 
 impl<'a> From<&'a Jwk> for PublicValidation<'a> {
@@ -592,6 +706,9 @@ impl<'a> From<&'a Jwk> for PublicValidation<'a> {
 			validate_aud: v.validate_aud,
 			leeway_seconds: v.leeway,
 			minimum_expiry_seconds: v.reject_tokens_expiring_in_less_than,
+			expected_token_type: key.profile.expected_token_type.as_deref(),
+			max_token_lifetime_seconds: key.profile.max_token_lifetime_seconds,
+			required_string_claims: sorted(&key.profile.required_string_claims),
 		}
 	}
 }
@@ -725,8 +842,7 @@ impl Jwt {
 		dtrace::pol_result!(
 			dtrace::Severity::Info,
 			Apply,
-			"authenticated request with JWT claims {}",
-			serde_json::to_string(&claims).unwrap_or_else(|_| "invalid claims".to_string())
+			"authenticated request with JWT"
 		);
 		req.extensions_mut().insert(claims);
 		Ok(())
@@ -734,22 +850,27 @@ impl Jwt {
 
 	pub fn validate_claims(&self, token: &str) -> Result<Claims, TokenError> {
 		let header = decode_header(token).map_err(|error| {
-			debug!(?error, "Received token with invalid header.");
+			debug!("Received token with invalid header.");
 
 			TokenError::InvalidHeader(error)
 		})?;
 		let kid = header.kid.as_ref().ok_or_else(|| {
-			debug!(?header, "Header is missing the `kid` attribute.");
+			debug!("Header is missing the `kid` attribute.");
 
 			TokenError::MissingKeyId
 		})?;
 
 		let decode_with = |key: &Jwk| {
-			decode::<Map<String, Value>>(token, &key.decoding, &key.validation).map(|decoded_token| {
-				Claims {
-					inner: decoded_token.claims,
-					jwt: SecretString::new(token.into()),
-				}
+			let decoded = decode::<Map<String, Value>>(token, &key.decoding, &key.validation)
+				.map_err(TokenError::Invalid)?;
+			key.profile.validate_token(
+				&decoded.header,
+				&decoded.claims,
+				jsonwebtoken::get_current_timestamp(),
+			)?;
+			Ok(Claims {
+				inner: decoded.claims,
+				jwt: SecretString::new(token.into()),
 			})
 		};
 
@@ -771,13 +892,13 @@ impl Jwt {
 			match decode_with(key) {
 				Ok(claims) => return Ok(claims),
 				Err(error) => {
-					debug!(?error, issuer = %provider.issuer, "Token is malformed or does not pass validation.");
+					debug!("Token is malformed or does not pass validation.");
 					first_error.get_or_insert(error);
 				},
 			}
 		}
 		if let Some(error) = first_error {
-			return Err(TokenError::Invalid(error));
+			return Err(error);
 		}
 
 		// No provider has both the token's iss and kid.
@@ -788,15 +909,11 @@ impl Jwt {
 			.iter()
 			.find_map(|provider| provider.keys.get(kid))
 			.ok_or_else(|| {
-				debug!(%kid, "Token refers to an unknown key.");
+				debug!("Token refers to an unknown key.");
 
 				TokenError::UnknownKeyId(kid.to_owned())
 			})?;
 
-		decode_with(key).map_err(|error| {
-			debug!(?error, "Token is malformed or does not pass validation.");
-
-			TokenError::Invalid(error)
-		})
+		decode_with(key)
 	}
 }

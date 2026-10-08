@@ -842,11 +842,17 @@ func translateJWTValidationOptions(opts *agentgateway.JWTValidationOptions) *api
 	if opts == nil {
 		return nil
 	}
+	opts = opts.DeepCopy()
 	claims := []string{"exp"}
 	if opts.RequiredClaims != nil {
 		claims = cast(*opts.RequiredClaims)
 	}
-	return &api.JWTValidationOptions{RequiredClaims: claims}
+	return &api.JWTValidationOptions{
+		RequiredClaims:          claims,
+		ExpectedTokenType:       opts.ExpectedTokenType,
+		MaxTokenLifetimeSeconds: opts.MaxTokenLifetimeSeconds,
+		RequiredStringClaims:    cast(opts.RequiredStringClaims),
+	}
 }
 
 func processBasicAuthenticationPolicy(

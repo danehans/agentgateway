@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use itertools::Itertools;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{JWTValidationOptions, JwkError, Jwt, LocalJwtConfig, Mode, Provider, TokenError};
 use crate::telemetry::log::MetricsConfig;
@@ -316,6 +316,15 @@ fn setup_test_jwt() -> (Jwt, &'static str, &'static str, &'static str) {
 fn setup_test_jwt_with_required_claims(
 	required_claims: HashSet<String>,
 ) -> (Jwt, &'static str, &'static str, &'static str) {
+	setup_test_jwt_with_options(JWTValidationOptions {
+		required_claims,
+		..Default::default()
+	})
+}
+
+fn setup_test_jwt_with_options(
+	options: JWTValidationOptions,
+) -> (Jwt, &'static str, &'static str, &'static str) {
 	let jwks = json!({
 		"keys": [
 			{
@@ -339,7 +348,7 @@ fn setup_test_jwt_with_required_claims(
 		jwks,
 		issuer.to_string(),
 		Some(vec![allowed_aud.to_string()]),
-		JWTValidationOptions { required_claims },
+		options,
 	)
 	.unwrap();
 
@@ -361,6 +370,14 @@ fn build_signed_token(kid: &str, iss: &str, aud: &str, exp: u64) -> String {
 }
 
 fn build_signed_token_with_payload(kid: &str, payload: serde_json::Value) -> String {
+	build_signed_token_with_type(kid, payload, Some("JWT"))
+}
+
+fn build_signed_token_with_type(
+	kid: &str,
+	payload: serde_json::Value,
+	typ: Option<&str>,
+) -> String {
 	// Test key matching the P-256 public coordinates in the JWKS fixtures.
 	const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgltxBTVDLg7C6vE1T
@@ -372,6 +389,7 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgltxBTVDLg7C6vE1T
 	let header = jsonwebtoken::Header {
 		alg: jsonwebtoken::Algorithm::ES256,
 		kid: Some(kid.to_string()),
+		typ: typ.map(str::to_owned),
 		..Default::default()
 	};
 	let key = jsonwebtoken::EncodingKey::from_ec_pem(TEST_PRIVATE_KEY_PEM.as_bytes()).unwrap();
@@ -1038,6 +1056,7 @@ pub fn test_empty_required_claims_accepts_token_without_exp() {
 
 	let jwt_validation_options = JWTValidationOptions {
 		required_claims: HashSet::new(),
+		..Default::default()
 	};
 
 	let provider = Provider::from_jwks(
@@ -1142,6 +1161,7 @@ pub fn test_empty_required_claims_still_rejects_expired_tokens() {
 
 	let jwt_validation_options = JWTValidationOptions {
 		required_claims: HashSet::new(),
+		..Default::default()
 	};
 
 	let provider = Provider::from_jwks(
@@ -1193,6 +1213,7 @@ pub fn test_required_claims_with_nbf_rejects_missing_nbf() {
 
 	let jwt_validation_options = JWTValidationOptions {
 		required_claims: HashSet::from(["exp".to_owned(), "nbf".to_owned()]),
+		..Default::default()
 	};
 
 	let provider = Provider::from_jwks(
@@ -1234,7 +1255,10 @@ fn test_public_validation_dump_tracks_applied_security_constraints() {
 			serde_json::from_value(json!({"keys":[key]})).unwrap(),
 			"https://example.com".into(),
 			audiences,
-			JWTValidationOptions { required_claims },
+			JWTValidationOptions {
+				required_claims,
+				..Default::default()
+			},
 		)
 		.unwrap()
 	};
@@ -1282,4 +1306,200 @@ fn test_public_validation_dump_tracks_applied_security_constraints() {
 		assert!(!raw.contains(field));
 	}
 	assert_eq!(dump, serde_json::to_value(&p).unwrap());
+}
+
+fn traffic_profile_options() -> JWTValidationOptions {
+	JWTValidationOptions {
+		required_claims: HashSet::new(),
+		expected_token_type: Some("runtime-traffic+jwt".to_owned()),
+		max_token_lifetime_seconds: Some(300),
+		required_string_claims: HashSet::from([
+			"execution_id".to_owned(),
+			"workload_id".to_owned(),
+			"jti".to_owned(),
+		]),
+	}
+}
+
+#[test]
+fn typed_profile_checks_signed_header_and_application_claims() {
+	let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(traffic_profile_options());
+	let now = jsonwebtoken::get_current_timestamp();
+	let payload = json!({"iss": issuer, "aud": audience, "iat": now, "exp": now + 300,
+        "workload_id": "synthetic-workload", "execution_id": "synthetic-execution", "jti": "synthetic-id"});
+	assert!(
+		jwt
+			.validate_claims(&build_signed_token_with_type(
+				kid,
+				payload.clone(),
+				Some("runtime-traffic+jwt")
+			))
+			.is_ok()
+	);
+	for typ in [
+		None,
+		Some("JWT"),
+		Some("RUNTIME-TRAFFIC+jwt"),
+		Some("runtime-session+jwt"),
+	] {
+		assert_eq!(
+			jwt
+				.validate_claims(&build_signed_token_with_type(kid, payload.clone(), typ))
+				.unwrap_err(),
+			TokenError::TokenTypeMismatch
+		);
+	}
+	for name in ["execution_id", "workload_id", "jti"] {
+		for invalid in [
+			Value::Null,
+			json!(false),
+			json!([]),
+			json!(42),
+			json!(""),
+			json!("x\n"),
+			json!("x".repeat(513)),
+		] {
+			let mut candidate = payload.clone();
+			candidate[name] = invalid;
+			assert_eq!(
+				jwt
+					.validate_claims(&build_signed_token_with_type(
+						kid,
+						candidate,
+						Some("runtime-traffic+jwt")
+					))
+					.unwrap_err(),
+				TokenError::TokenStringClaimInvalid
+			);
+		}
+		let mut missing = payload.clone();
+		missing.as_object_mut().unwrap().remove(name);
+		assert_eq!(
+			jwt
+				.validate_claims(&build_signed_token_with_type(
+					kid,
+					missing,
+					Some("runtime-traffic+jwt")
+				))
+				.unwrap_err(),
+			TokenError::TokenStringClaimInvalid
+		);
+	}
+}
+
+#[test]
+fn typed_profile_requires_bounded_integer_lifetime_even_without_required_claims() {
+	let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(traffic_profile_options());
+	let now = jsonwebtoken::get_current_timestamp();
+	let payload = json!({"iss": issuer, "aud": audience, "iat": now, "exp": now + 300,
+        "workload_id": "synthetic-workload", "execution_id": "synthetic-execution", "jti": "synthetic-id"});
+	for (iat, exp) in [
+		(json!(now + 30), json!(now + 60)),
+		(json!(now), json!(now + 301)),
+		(json!(now), json!(now)),
+		(json!(now), json!(now - 1)),
+		(json!(now - 1), json!(now - 1)),
+		(Value::Null, json!(now + 60)),
+		(json!("0"), json!(now + 60)),
+		(json!(-1), json!(now + 60)),
+		(json!(now as f64), json!(now + 60)),
+		(json!(now), json!("9999999999")),
+		(json!(now), json!(u64::MAX)),
+	] {
+		let mut candidate = payload.clone();
+		candidate["iat"] = iat;
+		candidate["exp"] = exp;
+		assert!(
+			jwt
+				.validate_claims(&build_signed_token_with_type(
+					kid,
+					candidate,
+					Some("runtime-traffic+jwt")
+				))
+				.is_err()
+		);
+	}
+	for name in ["iat", "exp"] {
+		let mut candidate = payload.clone();
+		candidate.as_object_mut().unwrap().remove(name);
+		assert!(
+			jwt
+				.validate_claims(&build_signed_token_with_type(
+					kid,
+					candidate,
+					Some("runtime-traffic+jwt")
+				))
+				.is_err()
+		);
+	}
+}
+
+#[test]
+fn typed_profile_cannot_replace_signature_issuer_or_audience_validation() {
+	let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(traffic_profile_options());
+	let now = jsonwebtoken::get_current_timestamp();
+	let payload = json!({"iss": issuer, "aud": audience, "iat": now, "exp": now + 60,
+        "workload_id": "synthetic-workload", "execution_id": "synthetic-execution", "jti": "synthetic-id"});
+	for name in ["iss", "aud"] {
+		let mut candidate = payload.clone();
+		candidate[name] = json!("other-authority");
+		assert!(
+			jwt
+				.validate_claims(&build_signed_token_with_type(
+					kid,
+					candidate,
+					Some("runtime-traffic+jwt")
+				))
+				.is_err()
+		);
+	}
+	let token = build_signed_token_with_type(kid, payload, Some("runtime-traffic+jwt"));
+	let (signed, _) = token.rsplit_once('.').unwrap();
+	assert!(jwt.validate_claims(&format!("{signed}.AAAA")).is_err());
+}
+
+#[test]
+fn typed_profile_refuses_invalid_configuration_and_reports_effective_constraints() {
+	let mut invalid = vec![];
+	for typ in ["", "type with spaces", "type\n", &"x".repeat(129)] {
+		let mut opts = traffic_profile_options();
+		opts.expected_token_type = Some(typ.to_owned());
+		invalid.push(opts);
+	}
+	for lifetime in [0, 86_401] {
+		let mut opts = traffic_profile_options();
+		opts.max_token_lifetime_seconds = Some(lifetime);
+		invalid.push(opts);
+	}
+	for name in ["", "9claim", "claim.with.path", &"x".repeat(129)] {
+		let mut opts = traffic_profile_options();
+		opts.required_string_claims = HashSet::from([name.to_owned()]);
+		invalid.push(opts);
+	}
+	let mut too_many = traffic_profile_options();
+	too_many.required_string_claims = (0..65).map(|index| format!("claim_{index}")).collect();
+	invalid.push(too_many);
+	for opts in invalid {
+		assert!(matches!(
+			opts.validate_configuration(),
+			Err(JwkError::InvalidValidationProfile)
+		));
+	}
+	let (jwt, _, _, _) = setup_test_jwt_with_options(traffic_profile_options());
+	let dump = serde_json::to_value(&jwt.providers[0]).unwrap();
+	assert_eq!(dump["validationSummaryVersion"], 2);
+	let applied = dump["validation"]
+		.as_object()
+		.unwrap()
+		.values()
+		.next()
+		.unwrap();
+	assert_eq!(applied["expectedTokenType"], "runtime-traffic+jwt");
+	assert_eq!(applied["maxTokenLifetimeSeconds"], 300);
+	assert_eq!(
+		applied["requiredStringClaims"],
+		json!(["execution_id", "jti", "workload_id"])
+	);
+	assert_eq!(applied["leewaySeconds"], 0);
+	assert_eq!(applied["requiredClaims"], json!(["aud", "exp", "iss"]));
 }

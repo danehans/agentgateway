@@ -1276,7 +1276,31 @@ type JWTValidationOptions struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=4
 	RequiredClaims *[]JWTClaim `json:"requiredClaims,omitempty"`
+	// Exact, case-sensitive JWT header typ. Omission retains legacy behavior.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._+/-]+$`
+	ExpectedTokenType *string `json:"expectedTokenType,omitempty"`
+	// Require integer iat/exp, no future issuance or expiry leeway, and a
+	// positive lifetime no longer than this value in seconds.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=86400
+	MaxTokenLifetimeSeconds *uint64 `json:"maxTokenLifetimeSeconds,omitempty"`
+	// Application claims that must be nonempty strings of at most 512 bytes
+	// without control characters. Authorization must separately check values.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=64
+	RequiredStringClaims []JWTStringClaim `json:"requiredStringClaims,omitempty"`
 }
+
+// JWTStringClaim is the name of a bounded application string claim.
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=128
+// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+type JWTStringClaim string
 
 // JWTClaim is a JWT claim whose presence can be required during validation.
 // +k8s:enum

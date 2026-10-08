@@ -293,3 +293,64 @@ func TestTranslateMCPAuthenticationSpecWhenLookupReturnsErrorEmitsEmptyKeySetAnd
 		t.Fatalf("expected permissive mode, got %v", spec.Mode)
 	}
 }
+
+func TestJWTValidationProfileReachesTrafficAndMCPPolicies(t *testing.T) {
+	typ := "runtime-traffic+jwt"
+	lifetime := uint64(300)
+	empty := []agentgateway.JWTClaim{}
+	opts := &agentgateway.JWTValidationOptions{
+		RequiredClaims:          &empty,
+		ExpectedTokenType:       &typ,
+		MaxTokenLifetimeSeconds: &lifetime,
+		RequiredStringClaims:    []agentgateway.JWTStringClaim{"execution_id", "workload_id", "jti"},
+	}
+	translated := translateJWTValidationOptions(opts)
+	if translated.ExpectedTokenType == nil || translated.GetExpectedTokenType() != typ || translated.MaxTokenLifetimeSeconds == nil || translated.GetMaxTokenLifetimeSeconds() != lifetime {
+		t.Fatalf("typed profile was lost during translation: %v", translated)
+	}
+	if len(translated.GetRequiredClaims()) != 0 || len(translated.GetRequiredStringClaims()) != 3 {
+		t.Fatalf("claim profile was lost during translation: %v", translated)
+	}
+	inline := agentgateway.LongString(`{"keys":[]}`)
+	auth := &agentgateway.JWTAuthentication{
+		Mode:      agentgateway.JWTAuthenticationModeStrict,
+		Providers: []agentgateway.JWTProvider{{Issuer: "synthetic-issuer", JWKS: agentgateway.JWKS{Inline: &inline}, Validation: opts}},
+	}
+	policy, err := processJWTAuthenticationPolicy(PolicyCtx{Krt: krt.TestingDummyContext{}}, auth, nil, "default/test:jwt", types.NamespacedName{Namespace: "default", Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := policy.GetTraffic().GetJwt().GetProviders()[0].GetJwtValidationOptions()
+	if applied.GetExpectedTokenType() != typ || applied.GetMaxTokenLifetimeSeconds() != lifetime || len(applied.GetRequiredStringClaims()) != 3 {
+		t.Fatalf("traffic policy lost typed profile: %v", applied)
+	}
+	mcpAuth := &agentgateway.MCPAuthentication{
+		Issuer: "synthetic-issuer",
+		JWKS: agentgateway.RemoteJWKS{
+			JwksPath:              longStringPtr("/keys"),
+			PolicyBackendEndpoint: agentgateway.PolicyBackendEndpoint{BackendRef: &gwv1.BackendObjectReference{Name: "jwks-backend"}},
+		},
+		Validation: opts,
+	}
+	wire, err := json.Marshal(mcpAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpAuth = &agentgateway.MCPAuthentication{}
+	if err := json.Unmarshal(wire, mcpAuth); err != nil {
+		t.Fatal(err)
+	}
+	mcp, err := translateMCPAuthenticationSpec(PolicyCtx{Krt: krt.TestingDummyContext{}, JWKSLookup: stubJWKSLookup{inline: `{"keys":[]}`}}, types.NamespacedName{Namespace: "default", Name: "test"}, mcpAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mcp.GetJwtValidationOptions(); got.GetExpectedTokenType() != typ || got.GetMaxTokenLifetimeSeconds() != lifetime || len(got.GetRequiredStringClaims()) != 3 {
+		t.Fatalf("MCP policy lost typed profile: %v", got)
+	}
+	*opts.ExpectedTokenType = "changed-type"
+	*opts.MaxTokenLifetimeSeconds = 1
+	opts.RequiredStringClaims[0] = "changed_claim"
+	if translated.GetExpectedTokenType() != "runtime-traffic+jwt" || translated.GetMaxTokenLifetimeSeconds() != 300 || translated.GetRequiredStringClaims()[0] != "execution_id" {
+		t.Fatalf("translated profile aliases authored configuration: %v", translated)
+	}
+}

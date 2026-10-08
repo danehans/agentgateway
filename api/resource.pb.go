@@ -7865,8 +7865,16 @@ type JWTValidationOptions struct {
 	// Claims that must be present in the token before validation.
 	// Defaults to ["exp"]. Use an empty list to require no claims.
 	RequiredClaims []string `protobuf:"bytes,1,rep,name=required_claims,json=requiredClaims,proto3" json:"required_claims,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Exact case-sensitive JWT header typ. Omission retains legacy behavior.
+	ExpectedTokenType *string `protobuf:"bytes,2,opt,name=expected_token_type,json=expectedTokenType,proto3,oneof" json:"expected_token_type,omitempty"`
+	// Require integer iat/exp, no future issuance or expiry leeway, and a
+	// positive lifetime no longer than this value (1 to 86400 seconds).
+	MaxTokenLifetimeSeconds *uint64 `protobuf:"varint,3,opt,name=max_token_lifetime_seconds,json=maxTokenLifetimeSeconds,proto3,oneof" json:"max_token_lifetime_seconds,omitempty"`
+	// Nonempty application string claims, bounded to 512 bytes without controls.
+	// Authorization policy must separately check their values.
+	RequiredStringClaims []string `protobuf:"bytes,4,rep,name=required_string_claims,json=requiredStringClaims,proto3" json:"required_string_claims,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *JWTValidationOptions) Reset() {
@@ -7902,6 +7910,27 @@ func (*JWTValidationOptions) Descriptor() ([]byte, []int) {
 func (x *JWTValidationOptions) GetRequiredClaims() []string {
 	if x != nil {
 		return x.RequiredClaims
+	}
+	return nil
+}
+
+func (x *JWTValidationOptions) GetExpectedTokenType() string {
+	if x != nil && x.ExpectedTokenType != nil {
+		return *x.ExpectedTokenType
+	}
+	return ""
+}
+
+func (x *JWTValidationOptions) GetMaxTokenLifetimeSeconds() uint64 {
+	if x != nil && x.MaxTokenLifetimeSeconds != nil {
+		return *x.MaxTokenLifetimeSeconds
+	}
+	return 0
+}
+
+func (x *JWTValidationOptions) GetRequiredStringClaims() []string {
+	if x != nil {
+		return x.RequiredStringClaims
 	}
 	return nil
 }
@@ -18731,9 +18760,14 @@ const file_resource_proto_rawDesc = "" +
 	"expression\x1aW\n" +
 	"\x06Fields\x12M\n" +
 	"\x03add\x18\x01 \x03(\v2;.agentgateway.dev.resource.FrontendPolicySpec.Metrics.FieldR\x03addB\x06\n" +
-	"\x04kind\"?\n" +
+	"\x04kind\"\xa3\x02\n" +
 	"\x14JWTValidationOptions\x12'\n" +
-	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\"\xaeV\n" +
+	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\x123\n" +
+	"\x13expected_token_type\x18\x02 \x01(\tH\x00R\x11expectedTokenType\x88\x01\x01\x12@\n" +
+	"\x1amax_token_lifetime_seconds\x18\x03 \x01(\x04H\x01R\x17maxTokenLifetimeSeconds\x88\x01\x01\x124\n" +
+	"\x16required_string_claims\x18\x04 \x03(\tR\x14requiredStringClaimsB\x16\n" +
+	"\x14_expected_token_typeB\x1d\n" +
+	"\x1b_max_token_lifetime_seconds\"\xaeV\n" +
 	"\x11TrafficPolicySpec\x12N\n" +
 	"\x05phase\x18\x01 \x01(\x0e28.agentgateway.dev.resource.TrafficPolicySpec.PolicyPhaseR\x05phase\x12>\n" +
 	"\atimeout\x18\x02 \x01(\v2\".agentgateway.dev.resource.TimeoutH\x00R\atimeout\x128\n" +
@@ -20529,6 +20563,7 @@ func file_resource_proto_init() {
 		(*FrontendPolicySpec_Metrics_)(nil),
 		(*FrontendPolicySpec_Connect_)(nil),
 	}
+	file_resource_proto_msgTypes[56].OneofWrappers = []any{}
 	file_resource_proto_msgTypes[57].OneofWrappers = []any{
 		(*TrafficPolicySpec_Timeout)(nil),
 		(*TrafficPolicySpec_Retry)(nil),

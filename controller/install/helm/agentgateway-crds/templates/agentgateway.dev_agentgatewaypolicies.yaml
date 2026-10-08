@@ -5920,6 +5920,21 @@ spec:
                               list removes only the additional presence requirements. Expiration is
                               still checked whenever `exp` is present.
                             properties:
+                              expectedTokenType:
+                                description: Exact, case-sensitive JWT header typ.
+                                  Omission retains legacy behavior.
+                                maxLength: 128
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9._+/-]+$
+                                type: string
+                              maxTokenLifetimeSeconds:
+                                description: |-
+                                  Require integer iat/exp, no future issuance or expiry leeway, and a
+                                  positive lifetime no longer than this value in seconds.
+                                format: int64
+                                maximum: 86400
+                                minimum: 1
+                                type: integer
                               requiredClaims:
                                 description: |-
                                   Additional claims that must be present in the token payload.
@@ -5940,6 +5955,20 @@ spec:
                                 maxItems: 4
                                 type: array
                                 x-kubernetes-list-type: atomic
+                              requiredStringClaims:
+                                description: |-
+                                  Application claims that must be nonempty strings of at most 512 bytes
+                                  without control characters. Authorization must separately check values.
+                                items:
+                                  description: JWTStringClaim is the name of a bounded
+                                    application string claim.
+                                  maxLength: 128
+                                  minLength: 1
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                  type: string
+                                maxItems: 64
+                                type: array
+                                x-kubernetes-list-type: set
                             type: object
                         required:
                         - jwks
@@ -9980,6 +10009,21 @@ spec:
                                 list removes only the additional presence requirements. Expiration is
                                 still checked whenever `exp` is present.
                               properties:
+                                expectedTokenType:
+                                  description: Exact, case-sensitive JWT header typ.
+                                    Omission retains legacy behavior.
+                                  maxLength: 128
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9._+/-]+$
+                                  type: string
+                                maxTokenLifetimeSeconds:
+                                  description: |-
+                                    Require integer iat/exp, no future issuance or expiry leeway, and a
+                                    positive lifetime no longer than this value in seconds.
+                                  format: int64
+                                  maximum: 86400
+                                  minimum: 1
+                                  type: integer
                                 requiredClaims:
                                   description: |-
                                     Additional claims that must be present in the token payload.
@@ -10000,6 +10044,20 @@ spec:
                                   maxItems: 4
                                   type: array
                                   x-kubernetes-list-type: atomic
+                                requiredStringClaims:
+                                  description: |-
+                                    Application claims that must be nonempty strings of at most 512 bytes
+                                    without control characters. Authorization must separately check values.
+                                  items:
+                                    description: JWTStringClaim is the name of a bounded
+                                      application string claim.
+                                    maxLength: 128
+                                    minLength: 1
+                                    pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: set
                               type: object
                           required:
                           - issuer
