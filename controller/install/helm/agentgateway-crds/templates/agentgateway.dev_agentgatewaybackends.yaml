@@ -16039,6 +16039,11 @@ spec:
                                 maximum: 86400
                                 minimum: 1
                                 type: integer
+                              nonForwardableToken:
+                                description: |-
+                                  Discard raw-token access after validation. Requires strict header
+                                  authentication without token preservation. Verified claims remain available.
+                                type: boolean
                               requiredClaims:
                                 description: |-
                                   Additional claims that must be present in the token payload.

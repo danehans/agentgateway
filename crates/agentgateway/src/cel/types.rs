@@ -2139,6 +2139,7 @@ pub struct ExecutorSerde {
 		default,
 		deserialize_with = "crate::process_identity::deserialize_current"
 	)]
+	#[cfg_attr(feature = "schema", schemars(transform = crate::process_identity::runtime_only_schema))]
 	pub gateway_process: crate::process_identity::GatewayProcess,
 
 	/// `request` contains attributes about the incoming HTTP request

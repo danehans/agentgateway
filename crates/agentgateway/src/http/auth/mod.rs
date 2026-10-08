@@ -252,11 +252,14 @@ async fn apply_backend_auth_kind(
 			let resolved = location.as_ref().unwrap_or(&DEFAULT_AUTHORIZATION_LOCATION);
 			// They should have a JWT policy defined. That will strip the token. Here we add it back
 			// TODO: should we also support API key, etc?
-			if let Some(token) = req
-				.extensions()
-				.get::<Claims>()
-				.map(|claim| claim.jwt.expose_secret().to_string())
-			{
+			if let Some(claims) = req.extensions().get::<Claims>() {
+				let token = claims.jwt.expose_secret();
+				if token.is_empty() {
+					return Err(ProcessingString(
+						"validated JWT is not available for backend forwarding".to_owned(),
+					));
+				}
+				let token = token.to_owned();
 				insert_local_auth(resolved, req, &token)?;
 			}
 			req

@@ -554,10 +554,47 @@ fn jwt_validation_options_from_proto(
 		expected_token_type: vo.expected_token_type.clone(),
 		max_token_lifetime_seconds: vo.max_token_lifetime_seconds,
 		required_string_claims: vo.required_string_claims.iter().cloned().collect(),
+		non_forwardable_token: vo.non_forwardable_token,
 	}
 }
 
 fn mcp_authentication_from_proto(
+	m: &proto::agent::backend_policy_spec::McpAuthentication,
+	diagnostics: &mut Diagnostics,
+) -> Result<McpAuthentication, ProtoError> {
+	match mcp_authentication_from_proto_inner(m, diagnostics) {
+		Err(_)
+			if m
+				.jwt_validation_options
+				.as_ref()
+				.is_some_and(|options| options.non_forwardable_token) =>
+		{
+			diagnostics.add_warning(
+				"invalid non-forwardable MCP authentication; all requests rejected".to_owned(),
+			);
+			Ok(build_mcp_authentication(
+				m.issuer.clone(),
+				m.audiences.clone(),
+				m.provider,
+				ResourceMetadata {
+					extra: Default::default(),
+				},
+				Arc::new(http::jwt::Jwt::from_providers(
+					vec![],
+					http::jwt::Mode::Strict,
+					http::auth::AuthorizationLocation::bearer_header(),
+					false,
+				)),
+				McpAuthenticationMode::Strict,
+				m.client_id.clone(),
+				m.client_secret.clone().map(Into::into),
+			))
+		},
+		result => result,
+	}
+}
+
+fn mcp_authentication_from_proto_inner(
 	m: &proto::agent::backend_policy_spec::McpAuthentication,
 	diagnostics: &mut Diagnostics,
 ) -> Result<McpAuthentication, ProtoError> {
@@ -573,6 +610,7 @@ fn mcp_authentication_from_proto(
 		.as_ref()
 		.map(jwt_validation_options_from_proto)
 		.unwrap_or_default();
+	let non_forwardable_token = jwt_validation_options.non_forwardable_token;
 	let jwt_provider = jwt_provider_from_inline_jwks_or_warn(
 		diagnostics,
 		"MCP Authentication",
@@ -596,11 +634,13 @@ fn mcp_authentication_from_proto(
 		},
 	};
 
-	let jwt_validator = http::jwt::Jwt::from_providers(
+	let jwt_validator = jwt_with_credential_retention_guard(
 		jwt_provider.into_iter().collect(),
+		non_forwardable_token,
 		mode.into(),
 		http::auth::AuthorizationLocation::bearer_header(),
 		false,
+		diagnostics,
 	);
 	Ok(build_mcp_authentication(
 		m.issuer.clone(),
@@ -614,6 +654,31 @@ fn mcp_authentication_from_proto(
 	))
 }
 
+// Invalid credential retention must retain an authentication barrier. Returning a
+// conversion error can remove the policy from an otherwise usable configuration.
+fn jwt_with_credential_retention_guard(
+	providers: Vec<http::jwt::Provider>,
+	non_forwardable_token: bool,
+	mode: http::jwt::Mode,
+	location: http::auth::AuthorizationLocation,
+	preserve_token: bool,
+	diagnostics: &mut Diagnostics,
+) -> http::jwt::Jwt {
+	if http::jwt::Jwt::validate_credential_retention_options(
+		non_forwardable_token,
+		mode,
+		&location,
+		preserve_token,
+	)
+	.is_err()
+	{
+		diagnostics
+			.add_warning("invalid non-forwardable JWT configuration; all requests rejected".to_owned());
+		return http::jwt::Jwt::from_providers(vec![], http::jwt::Mode::Strict, location, false);
+	}
+	http::jwt::Jwt::from_providers(providers, mode, location, preserve_token)
+}
+
 fn jwt_provider_from_inline_jwks_or_warn(
 	diagnostics: &mut Diagnostics,
 	context: impl AsRef<str>,
@@ -625,8 +690,8 @@ fn jwt_provider_from_inline_jwks_or_warn(
 	let context = context.as_ref();
 	let jwk_set = match serde_json::from_str::<jsonwebtoken::jwk::JwkSet>(jwks_json) {
 		Ok(jwk_set) => jwk_set,
-		Err(err) => {
-			diagnostics.add_warning(format!("failed to parse JWKS for {context}: {err}"));
+		Err(_) => {
+			diagnostics.add_warning(format!("failed to parse JWKS for {context}"));
 			return None;
 		},
 	};
@@ -2686,91 +2751,118 @@ fn traffic_policy_from_proto(
 			TrafficPolicy::Authorization(authorization_from_proto(rbac, diagnostics))
 		},
 		Some(tps::Kind::Jwt(jwt)) => {
-			let mode = match tps::jwt::Mode::try_from(jwt.mode)
-				.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
-			{
-				tps::jwt::Mode::Optional => http::jwt::Mode::Optional,
-				tps::jwt::Mode::Strict => http::jwt::Mode::Strict,
-				tps::jwt::Mode::Permissive => http::jwt::Mode::Permissive,
-			};
-			let providers = jwt
-				.providers
-				.iter()
-				.map(|p| {
-					let jwks_json = match &p.jwks_source {
-						Some(tps::jwt_provider::JwksSource::Inline(inline)) => inline,
-						None => {
-							return Err(ProtoError::Generic(
-								"JWT policy missing JWKS source".to_string(),
-							));
-						},
-					};
-					let audiences = if p.audiences.is_empty() {
-						None
-					} else {
-						Some(p.audiences.clone())
-					};
-					let jwt_validation_options = p
-						.jwt_validation_options
-						.as_ref()
-						.map(jwt_validation_options_from_proto)
-						.unwrap_or_default();
-					Ok(jwt_provider_from_inline_jwks_or_warn(
+			let non_forwardable_token = jwt.providers.iter().any(|provider| {
+				provider
+					.jwt_validation_options
+					.as_ref()
+					.is_some_and(|options| options.non_forwardable_token)
+			});
+			let result: Result<TrafficPolicy, ProtoError> = (|| {
+				let mode = match tps::jwt::Mode::try_from(jwt.mode)
+					.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
+				{
+					tps::jwt::Mode::Optional => http::jwt::Mode::Optional,
+					tps::jwt::Mode::Strict => http::jwt::Mode::Strict,
+					tps::jwt::Mode::Permissive => http::jwt::Mode::Permissive,
+				};
+				let providers = jwt
+					.providers
+					.iter()
+					.map(|p| {
+						let jwks_json = match &p.jwks_source {
+							Some(tps::jwt_provider::JwksSource::Inline(inline)) => inline,
+							None => {
+								return Err(ProtoError::Generic(
+									"JWT policy missing JWKS source".to_string(),
+								));
+							},
+						};
+						let audiences = if p.audiences.is_empty() {
+							None
+						} else {
+							Some(p.audiences.clone())
+						};
+						let jwt_validation_options = p
+							.jwt_validation_options
+							.as_ref()
+							.map(jwt_validation_options_from_proto)
+							.unwrap_or_default();
+						Ok(jwt_provider_from_inline_jwks_or_warn(
+							diagnostics,
+							"JWT policy",
+							jwks_json,
+							p.issuer.clone(),
+							audiences,
+							jwt_validation_options,
+						))
+					})
+					.collect::<Result<Vec<_>, _>>()?
+					.into_iter()
+					.flatten()
+					.collect();
+				let jwt_auth = jwt_with_credential_retention_guard(
+					providers,
+					non_forwardable_token,
+					mode,
+					authorization_location(
 						diagnostics,
-						"JWT policy",
-						jwks_json,
-						p.issuer.clone(),
-						audiences,
-						jwt_validation_options,
-					))
-				})
-				.collect::<Result<Vec<_>, _>>()?
-				.into_iter()
-				.flatten()
-				.collect();
-			let jwt_auth = http::jwt::Jwt::from_providers(
-				providers,
-				mode,
-				authorization_location(
+						"jwtAuthentication.authorizationLocation.expression",
+						jwt.authorization_location.as_ref(),
+						http::auth::AuthorizationLocation::bearer_header(),
+					)?,
+					jwt.preserve_token,
 					diagnostics,
-					"jwtAuthentication.authorizationLocation.expression",
-					jwt.authorization_location.as_ref(),
-					http::auth::AuthorizationLocation::bearer_header(),
-				)?,
-				jwt.preserve_token,
-			);
-			let mcp = match &jwt.mcp {
-				Some(mcp) => {
-					if jwt.providers.len() != 1 {
-						return Err(ProtoError::Generic(format!(
-							"JWT MCP extension requires exactly one provider, found {}",
-							jwt.providers.len()
-						)));
-					}
-					let provider = &jwt.providers[0];
-					Some(build_mcp_authentication(
-						provider.issuer.clone(),
-						provider.audiences.clone(),
-						mcp.provider,
-						convert_mcp_resource_metadata(mcp.resource_metadata.as_ref().map(|rm| rm.extra.iter())),
-						Arc::new(jwt_auth.clone()),
-						match tps::jwt::Mode::try_from(jwt.mode)
-							.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
-						{
-							tps::jwt::Mode::Optional => McpAuthenticationMode::Optional,
-							tps::jwt::Mode::Strict => McpAuthenticationMode::Strict,
-							tps::jwt::Mode::Permissive => McpAuthenticationMode::Permissive,
-						},
-						mcp.client_id.clone(),
-						mcp.client_secret.clone().map(Into::into),
-					))
+				);
+				let mcp = match &jwt.mcp {
+					Some(mcp) => {
+						if jwt.providers.len() != 1 {
+							return Err(ProtoError::Generic(format!(
+								"JWT MCP extension requires exactly one provider, found {}",
+								jwt.providers.len()
+							)));
+						}
+						let provider = &jwt.providers[0];
+						Some(build_mcp_authentication(
+							provider.issuer.clone(),
+							provider.audiences.clone(),
+							mcp.provider,
+							convert_mcp_resource_metadata(
+								mcp.resource_metadata.as_ref().map(|rm| rm.extra.iter()),
+							),
+							Arc::new(jwt_auth.clone()),
+							match tps::jwt::Mode::try_from(jwt.mode)
+								.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
+							{
+								tps::jwt::Mode::Optional => McpAuthenticationMode::Optional,
+								tps::jwt::Mode::Strict => McpAuthenticationMode::Strict,
+								tps::jwt::Mode::Permissive => McpAuthenticationMode::Permissive,
+							},
+							mcp.client_id.clone(),
+							mcp.client_secret.clone().map(Into::into),
+						))
+					},
+					None => None,
+				};
+				Ok(TrafficPolicy::JwtAuth(RequestPolicy::single(
+					JwtAuthentication { jwt: jwt_auth, mcp },
+				)))
+			})();
+			match result {
+				Err(_) if non_forwardable_token => {
+					diagnostics
+						.add_warning("invalid non-forwardable JWT policy; all requests rejected".to_owned());
+					TrafficPolicy::JwtAuth(RequestPolicy::single(JwtAuthentication {
+						jwt: http::jwt::Jwt::from_providers(
+							vec![],
+							http::jwt::Mode::Strict,
+							http::auth::AuthorizationLocation::bearer_header(),
+							false,
+						),
+						mcp: None,
+					}))
 				},
-				None => None,
-			};
-			TrafficPolicy::JwtAuth(RequestPolicy::single(JwtAuthentication {
-				jwt: jwt_auth,
-				mcp,
-			}))
+				result => result?,
+			}
 		},
 		Some(tps::Kind::Transformation(tp)) => TrafficPolicy::Transformation(RequestPolicy::single(
 			transformation_from_proto(tp, diagnostics)?,
@@ -4761,6 +4853,7 @@ mod tests {
 			expected_token_type: Some("runtime-traffic+jwt".to_owned()),
 			max_token_lifetime_seconds: Some(300),
 			required_string_claims: vec!["workload_id".to_owned(), "execution_id".to_owned()],
+			non_forwardable_token: true,
 		};
 		let jwks = r#"{"keys":[{"use":"sig","kty":"EC","kid":"synthetic-key","crv":"P-256","alg":"ES256","x":"WM7udBHga09KxC5kxq6GhrZ9M3Y8S9ZThq_XxsOcDhk","y":"xc7T4afkXmwjEbJMzQXCdQcU3PZKiLFlHl23GE1z4ug"}]}"#;
 		let spec = proto::agent::TrafficPolicySpec {
@@ -4788,6 +4881,7 @@ mod tests {
 				audiences: vec!["synthetic-audience".into()],
 				jwks_inline: jwks.into(),
 				jwt_validation_options: Some(options),
+				mode: proto::agent::backend_policy_spec::mcp_authentication::Mode::Strict as i32,
 				..Default::default()
 			},
 			&mut diagnostics,
@@ -4800,6 +4894,7 @@ mod tests {
 			let applied = &provider["validation"]["synthetic-key"];
 			assert_eq!(applied["expectedTokenType"], "runtime-traffic+jwt");
 			assert_eq!(applied["maxTokenLifetimeSeconds"], 300);
+			assert_eq!(applied["nonForwardableToken"], true);
 			assert_eq!(
 				applied["requiredStringClaims"],
 				json!(["execution_id", "workload_id"])
@@ -4808,6 +4903,88 @@ mod tests {
 			assert_eq!(applied["requiredClaims"], json!(["aud", "exp", "iss"]));
 		}
 		Ok(())
+	}
+
+	#[tokio::test]
+	async fn non_forwardable_xds_conflicts_retain_rejecting_authentication() {
+		use proto::agent::traffic_policy_spec as tps;
+		for (mode, preserve_token, jwks) in [
+			(
+				tps::jwt::Mode::Optional as i32,
+				false,
+				Some("{\"keys\":[]}"),
+			),
+			(
+				tps::jwt::Mode::Permissive as i32,
+				false,
+				Some("malformed-sensitive-jwks"),
+			),
+			(tps::jwt::Mode::Strict as i32, true, Some("{\"keys\":[]}")),
+			(999, false, Some("{\"keys\":[]}")),
+			(tps::jwt::Mode::Strict as i32, false, None),
+		] {
+			let spec = proto::agent::TrafficPolicySpec {
+				kind: Some(tps::Kind::Jwt(tps::Jwt {
+					mode,
+					preserve_token,
+					providers: vec![tps::JwtProvider {
+						issuer: "synthetic-issuer".into(),
+						audiences: vec![],
+						jwks_source: jwks.map(|s| tps::jwt_provider::JwksSource::Inline(s.into())),
+						jwt_validation_options: Some(proto::agent::JwtValidationOptions {
+							non_forwardable_token: true,
+							..Default::default()
+						}),
+					}],
+					..Default::default()
+				})),
+				..Default::default()
+			};
+			let mut diagnostics = Diagnostics::default();
+			let TrafficPolicy::JwtAuth(policies) =
+				traffic_policy_from_proto(&spec, &mut diagnostics).unwrap()
+			else {
+				panic!("authentication barrier missing");
+			};
+			let jwt = &policies.iter().next().unwrap().pol.jwt;
+			assert!(!diagnostics.into_warnings().is_empty());
+			for token in [None, Some(build_unsigned_token("synthetic-key"))] {
+				let mut req = crate::http::Request::new(crate::http::Body::empty());
+				if let Some(token) = token {
+					req.headers_mut().insert(
+						http::header::AUTHORIZATION,
+						format!("Bearer {token}").parse().unwrap(),
+					);
+				}
+				assert!(jwt.apply(None, &mut req).await.is_err());
+				assert!(req.extensions().get::<crate::http::jwt::Claims>().is_none());
+			}
+		}
+		for (mode, jwks) in [
+			(0, "{\"keys\":[]}"),
+			(2, "malformed-sensitive-jwks"),
+			(999, "{\"keys\":[]}"),
+			(0, ""),
+		] {
+			let mut diagnostics = Diagnostics::default();
+			let mcp = mcp_authentication_from_proto(
+				&proto::agent::backend_policy_spec::McpAuthentication {
+					issuer: "synthetic-issuer".into(),
+					mode,
+					jwks_inline: jwks.into(),
+					jwt_validation_options: Some(proto::agent::JwtValidationOptions {
+						non_forwardable_token: true,
+						..Default::default()
+					}),
+					..Default::default()
+				},
+				&mut diagnostics,
+			)
+			.unwrap();
+			assert!(!diagnostics.into_warnings().is_empty());
+			let mut req = crate::http::Request::new(crate::http::Body::empty());
+			assert!(mcp.jwt_validator.apply(None, &mut req).await.is_err());
+		}
 	}
 
 	#[test]

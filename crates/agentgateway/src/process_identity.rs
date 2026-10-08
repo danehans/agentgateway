@@ -22,6 +22,16 @@ impl Default for GatewayProcess {
 	}
 }
 
+/// Runtime state has no configurable default. Avoid freezing a generator's boot
+/// ID into published schemas, and mark the informational output read-only.
+#[cfg(feature = "schema")]
+pub(crate) fn runtime_only_schema(schema: &mut schemars::Schema) {
+	if let Some(object) = schema.as_object_mut() {
+		object.remove("default");
+		object.insert("readOnly".to_owned(), true.into());
+	}
+}
+
 /// Consume informational snapshots, but restore this process's immutable identity.
 pub(crate) fn deserialize_current<'de, D: serde::Deserializer<'de>>(
 	deserializer: D,

@@ -1294,6 +1294,10 @@ type JWTValidationOptions struct {
 	// +listType=set
 	// +kubebuilder:validation:MaxItems=64
 	RequiredStringClaims []JWTStringClaim `json:"requiredStringClaims,omitempty"`
+	// Discard raw-token access after validation. Requires strict header
+	// authentication without token preservation. Verified claims remain available.
+	// +optional
+	NonForwardableToken bool `json:"nonForwardableToken,omitempty"`
 }
 
 // JWTStringClaim is the name of a bounded application string claim.

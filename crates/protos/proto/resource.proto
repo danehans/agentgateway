@@ -976,6 +976,9 @@ message JWTValidationOptions {
   // Nonempty application string claims, bounded to 512 bytes without controls.
   // Authorization policy must separately check their values.
   repeated string required_string_claims = 4;
+  // Discard raw-token access after validation. Requires strict header
+  // authentication and preserve_token=false; verified claims remain available.
+  bool non_forwardable_token = 5;
 }
 
 message TrafficPolicySpec {

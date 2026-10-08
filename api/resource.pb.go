@@ -7873,8 +7873,11 @@ type JWTValidationOptions struct {
 	// Nonempty application string claims, bounded to 512 bytes without controls.
 	// Authorization policy must separately check their values.
 	RequiredStringClaims []string `protobuf:"bytes,4,rep,name=required_string_claims,json=requiredStringClaims,proto3" json:"required_string_claims,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Discard raw-token access after validation. Requires strict header
+	// authentication and preserve_token=false; verified claims remain available.
+	NonForwardableToken bool `protobuf:"varint,5,opt,name=non_forwardable_token,json=nonForwardableToken,proto3" json:"non_forwardable_token,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *JWTValidationOptions) Reset() {
@@ -7933,6 +7936,13 @@ func (x *JWTValidationOptions) GetRequiredStringClaims() []string {
 		return x.RequiredStringClaims
 	}
 	return nil
+}
+
+func (x *JWTValidationOptions) GetNonForwardableToken() bool {
+	if x != nil {
+		return x.NonForwardableToken
+	}
+	return false
 }
 
 type TrafficPolicySpec struct {
@@ -18760,12 +18770,13 @@ const file_resource_proto_rawDesc = "" +
 	"expression\x1aW\n" +
 	"\x06Fields\x12M\n" +
 	"\x03add\x18\x01 \x03(\v2;.agentgateway.dev.resource.FrontendPolicySpec.Metrics.FieldR\x03addB\x06\n" +
-	"\x04kind\"\xa3\x02\n" +
+	"\x04kind\"\xd7\x02\n" +
 	"\x14JWTValidationOptions\x12'\n" +
 	"\x0frequired_claims\x18\x01 \x03(\tR\x0erequiredClaims\x123\n" +
 	"\x13expected_token_type\x18\x02 \x01(\tH\x00R\x11expectedTokenType\x88\x01\x01\x12@\n" +
 	"\x1amax_token_lifetime_seconds\x18\x03 \x01(\x04H\x01R\x17maxTokenLifetimeSeconds\x88\x01\x01\x124\n" +
-	"\x16required_string_claims\x18\x04 \x03(\tR\x14requiredStringClaimsB\x16\n" +
+	"\x16required_string_claims\x18\x04 \x03(\tR\x14requiredStringClaims\x122\n" +
+	"\x15non_forwardable_token\x18\x05 \x01(\bR\x13nonForwardableTokenB\x16\n" +
 	"\x14_expected_token_typeB\x1d\n" +
 	"\x1b_max_token_lifetime_seconds\"\xaeV\n" +
 	"\x11TrafficPolicySpec\x12N\n" +

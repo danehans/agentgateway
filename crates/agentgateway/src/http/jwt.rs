@@ -20,12 +20,12 @@ mod tests;
 
 const TRACE_POLICY_KIND: &str = "jwt";
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(thiserror::Error, PartialEq)]
 pub enum TokenError {
-	#[error("the token is invalid or malformed: {0:?}")]
+	#[error("the token is invalid or malformed")]
 	Invalid(jsonwebtoken::errors::Error),
 
-	#[error("the token header is malformed: {0:?}")]
+	#[error("the token header is malformed")]
 	InvalidHeader(jsonwebtoken::errors::Error),
 
 	#[error("no bearer token found")]
@@ -37,7 +37,7 @@ pub enum TokenError {
 	#[error("token uses an unknown key")]
 	UnknownKeyId(String),
 
-	#[error("failed to strip validated credentials from the request: {0}")]
+	#[error("failed to strip validated credentials from the request")]
 	CredentialRemoval(String),
 
 	#[error("token type does not match the configured profile")]
@@ -46,35 +46,57 @@ pub enum TokenError {
 	TokenLifetimeInvalid,
 	#[error("token string claims do not match the configured profile")]
 	TokenStringClaimInvalid,
+	#[error("non-forwardable credentials require strict header authentication without preservation")]
+	InvalidCredentialRetention,
+	#[error("non-forwardable credential carrier is ambiguous")]
+	AmbiguousCredentialCarrier,
 }
 
-#[derive(thiserror::Error, Debug)]
+impl std::fmt::Debug for TokenError {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		std::fmt::Display::fmt(self, formatter)
+	}
+}
+
+#[derive(thiserror::Error)]
 pub enum JwkError {
 	#[error("invalid JWT validation profile")]
 	InvalidValidationProfile,
-	#[error("failed to load JWKS: {0}")]
+	#[error("failed to load JWKS")]
 	JwkLoadError(anyhow::Error),
-	#[error("failed to parse JWKS: {0}")]
-	JwksParseError(#[from] serde_json::Error),
+	#[error("failed to parse JWKS")]
+	JwksParseError(serde_json::Error),
 	#[error("the key is missing the `kid` attribute")]
 	MissingKeyId,
-	#[error("could not construct a decoding key for {key_id:?}: {error:?}")]
+	#[error("could not construct a JWT decoding key")]
 	DecodingError {
 		key_id: String,
 		error: jsonwebtoken::errors::Error,
 	},
-	#[error(
-		"the key {key_id:?} uses an unsupported algorithm {algorithm:?} (supported: RSA, EC, OKP[Ed25519])"
-	)]
+	#[error("unsupported JWT key algorithm (supported: RSA, EC, OKP[Ed25519])")]
 	UnexpectedAlgorithm {
 		algorithm: AlgorithmParameters,
 		key_id: String,
 	},
-	#[error("the key {key_id:?} uses unsupported OKP curve {curve:?} (supported: Ed25519)")]
+	#[error("unsupported JWT key curve (supported: Ed25519)")]
 	UnsupportedCurve {
 		key_id: String,
 		curve: EllipticCurve,
 	},
+	#[error("non-forwardable credentials require strict header authentication without preservation")]
+	InvalidCredentialRetention,
+}
+
+impl std::fmt::Debug for JwkError {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		std::fmt::Display::fmt(self, formatter)
+	}
+}
+
+impl From<serde_json::Error> for JwkError {
+	fn from(error: serde_json::Error) -> Self {
+		Self::JwksParseError(error)
+	}
 }
 
 #[derive(Clone)]
@@ -89,6 +111,7 @@ pub struct Jwt {
 pub struct Provider {
 	issuer: String,
 	keys: HashMap<String, Jwk>,
+	non_forwardable_token: bool,
 }
 
 // TODO: can we give anything useful here?
@@ -134,7 +157,9 @@ impl serde::Serialize for Provider {
 		Serde {
 			issuer: &self.issuer,
 			keys,
-			validation_summary_version: if self.keys.values().any(|key| key.profile.is_configured()) {
+			validation_summary_version: if self.non_forwardable_token
+				|| self.keys.values().any(|key| key.profile.is_configured())
+			{
 				2
 			} else {
 				1
@@ -321,6 +346,10 @@ pub struct JWTValidationOptions {
 	/// bytes without control characters. Values still require authorization policy.
 	#[serde(default, skip_serializing_if = "HashSet::is_empty")]
 	pub required_string_claims: HashSet<String>,
+	/// Discard raw token access after validation. Requires strict header
+	/// authentication and preserveToken=false. Verified claims remain available.
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	pub non_forwardable_token: bool,
 }
 
 impl JWTValidationOptions {
@@ -328,6 +357,7 @@ impl JWTValidationOptions {
 		self.expected_token_type.is_some()
 			|| self.max_token_lifetime_seconds.is_some()
 			|| !self.required_string_claims.is_empty()
+			|| self.non_forwardable_token
 	}
 
 	fn validate_configuration(&self) -> Result<(), JwkError> {
@@ -422,6 +452,7 @@ impl Default for JWTValidationOptions {
 			expected_token_type: None,
 			max_token_lifetime_seconds: None,
 			required_string_claims: HashSet::new(),
+			non_forwardable_token: false,
 		}
 	}
 }
@@ -458,6 +489,14 @@ impl LocalJwtConfig {
 				}],
 			),
 		};
+		Jwt::validate_credential_retention_options(
+			providers_cfg
+				.iter()
+				.any(|provider| provider.jwt_validation_options.non_forwardable_token),
+			mode,
+			&authorization_location,
+			preserve_token,
+		)?;
 
 		let mut providers = Vec::with_capacity(providers_cfg.len());
 		for pc in providers_cfg {
@@ -469,12 +508,14 @@ impl LocalJwtConfig {
 			let provider = Provider::from_jwks(jwks, pc.issuer, pc.audiences, pc.jwt_validation_options)?;
 			providers.push(provider);
 		}
-		Ok(Jwt {
+		let jwt = Jwt {
 			mode,
 			providers,
 			location: authorization_location,
 			preserve_token,
-		})
+		};
+		jwt.validate_credential_retention()?;
+		Ok(jwt)
 	}
 }
 
@@ -596,11 +637,47 @@ impl Provider {
 			);
 		}
 
-		Ok(Provider { issuer, keys })
+		Ok(Provider {
+			issuer,
+			keys,
+			non_forwardable_token: jwt_validation_options.non_forwardable_token,
+		})
 	}
 }
 
 impl Jwt {
+	pub(crate) fn validate_credential_retention(&self) -> Result<(), JwkError> {
+		Self::validate_credential_retention_options(
+			self.has_non_forwardable_token(),
+			self.mode,
+			&self.location,
+			self.preserve_token,
+		)
+	}
+
+	pub(crate) fn validate_credential_retention_options(
+		non_forwardable: bool,
+		mode: Mode,
+		location: &AuthorizationLocation,
+		preserve_token: bool,
+	) -> Result<(), JwkError> {
+		if non_forwardable
+			&& (mode != Mode::Strict
+				|| preserve_token
+				|| !matches!(location, AuthorizationLocation::Header { .. }))
+		{
+			return Err(JwkError::InvalidCredentialRetention);
+		}
+		Ok(())
+	}
+
+	fn has_non_forwardable_token(&self) -> bool {
+		self
+			.providers
+			.iter()
+			.any(|provider| provider.non_forwardable_token)
+	}
+
 	pub fn from_providers(
 		providers: Vec<Provider>,
 		mode: Mode,
@@ -672,6 +749,8 @@ struct PublicValidation<'a> {
 	max_token_lifetime_seconds: Option<u64>,
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	required_string_claims: Vec<&'a str>,
+	#[serde(skip_serializing_if = "std::ops::Not::not")]
+	non_forwardable_token: bool,
 }
 
 impl<'a> From<&'a Jwk> for PublicValidation<'a> {
@@ -709,6 +788,7 @@ impl<'a> From<&'a Jwk> for PublicValidation<'a> {
 			expected_token_type: key.profile.expected_token_type.as_deref(),
 			max_token_lifetime_seconds: key.profile.max_token_lifetime_seconds,
 			required_string_claims: sorted(&key.profile.required_string_claims),
+			non_forwardable_token: key.profile.non_forwardable_token,
 		}
 	}
 }
@@ -736,7 +816,7 @@ impl schemars::JsonSchema for Claims {
 			"properties": {
 				"rawToken": {
 					"type": "string",
-					"description": "The raw bearer token. Redacted by default; use `jwt.rawToken.unredacted()` to access the actual value."
+					"description": "The raw bearer token. Redacted by default; use `jwt.rawToken.unredacted()` to access the actual value. Empty when the validating provider selects nonForwardableToken."
 				}
 			},
 			"additionalProperties": true
@@ -789,6 +869,15 @@ impl Jwt {
 		log: Option<&mut RequestLog>,
 		req: &mut Request,
 	) -> Result<(), TokenError> {
+		self
+			.validate_credential_retention()
+			.map_err(|_| TokenError::InvalidCredentialRetention)?;
+		if self.has_non_forwardable_token()
+			&& let AuthorizationLocation::Header { name, .. } = &self.location
+			&& req.headers().get_all(name).iter().count() > 1
+		{
+			return Err(TokenError::AmbiguousCredentialCarrier);
+		}
 		let Some(token) = self.location.extract(req) else {
 			// In strict mode, we require a token
 			if self.mode == Mode::Strict {
@@ -870,7 +959,11 @@ impl Jwt {
 			)?;
 			Ok(Claims {
 				inner: decoded.claims,
-				jwt: SecretString::new(token.into()),
+				jwt: SecretString::new(if key.profile.non_forwardable_token {
+					String::new().into()
+				} else {
+					token.into()
+				}),
 			})
 		};
 

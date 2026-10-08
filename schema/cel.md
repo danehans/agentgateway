@@ -2,6 +2,9 @@
 
 |Field|Type|Description|
 |-|-|-|
+|`gatewayProcess`|object|Informational serialization only; input cannot replace the executing process.|
+|`gatewayProcess.version`|integer||
+|`gatewayProcess.instanceId`|string||
 |`request`|object|`request` contains attributes about the incoming HTTP request|
 |`request.method`|string|The HTTP method of the request. For example, `GET`|
 |`request.uri`|string|The complete URI of the request. For example, `http://example.com/path`.|
@@ -44,7 +47,7 @@
 |`env.namespace`|string|The namespace of the pod (when running on Kubernetes)|
 |`env.gateway`|string|The Gateway we are running as (when running on Kubernetes)|
 |`jwt`|object|`jwt` contains the claims from a verified JWT token. This is only present if the JWT policy is enabled.|
-|`jwt.rawToken`|string|The raw bearer token. Redacted by default; use `jwt.rawToken.unredacted()` to access the actual value.|
+|`jwt.rawToken`|string|The raw bearer token. Redacted by default; use `jwt.rawToken.unredacted()` to access the actual value. Empty when the validating provider selects nonForwardableToken.|
 |`jwt.*`|any||
 |`apiKey`|object|`apiKey` contains the claims from a verified API Key. This is only present if the API Key policy is enabled.<br>In addition to `key`, user-supplied metadata fields are flattened into this object; for example,<br>`apiKey.group`. Metadata values are plain JSON and are not treated as secrets.|
 |`apiKey.key`|string|The API key value. Redacted by default; use `apiKey.key.unredacted()` to access the actual value.|

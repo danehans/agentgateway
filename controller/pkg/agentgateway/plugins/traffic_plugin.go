@@ -852,6 +852,7 @@ func translateJWTValidationOptions(opts *agentgateway.JWTValidationOptions) *api
 		ExpectedTokenType:       opts.ExpectedTokenType,
 		MaxTokenLifetimeSeconds: opts.MaxTokenLifetimeSeconds,
 		RequiredStringClaims:    cast(opts.RequiredStringClaims),
+		NonForwardableToken:     opts.NonForwardableToken,
 	}
 }
 

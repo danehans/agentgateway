@@ -1318,6 +1318,7 @@ fn traffic_profile_options() -> JWTValidationOptions {
 			"workload_id".to_owned(),
 			"jti".to_owned(),
 		]),
+		non_forwardable_token: false,
 	}
 }
 
@@ -1502,4 +1503,184 @@ fn typed_profile_refuses_invalid_configuration_and_reports_effective_constraints
 	);
 	assert_eq!(applied["leewaySeconds"], 0);
 	assert_eq!(applied["requiredClaims"], json!(["aud", "exp", "iss"]));
+}
+
+#[tokio::test]
+async fn non_forwardable_token_keeps_claims_and_provider_auth_without_raw_access() {
+	use secrecy::ExposeSecret;
+
+	use crate::http::auth::AuthorizationLocation;
+	let (mut jwt, kid, issuer, aud) = setup_test_jwt_with_options(JWTValidationOptions {
+		non_forwardable_token: true,
+		..Default::default()
+	});
+	jwt.location = AuthorizationLocation::Header {
+		name: http::HeaderName::from_static("x-runtime-token"),
+		prefix: None,
+	};
+	let token = build_signed_token(kid, issuer, aud, 4_102_444_800);
+	let mut req = crate::http::Request::new(crate::http::Body::empty());
+	req
+		.headers_mut()
+		.insert("x-runtime-token", token.parse().unwrap());
+	req.headers_mut().insert(
+		http::header::AUTHORIZATION,
+		"Bearer synthetic-provider-key".parse().unwrap(),
+	);
+	jwt.apply(None, &mut req).await.unwrap();
+	assert!(!req.headers().contains_key("x-runtime-token"));
+	assert_eq!(
+		req.headers()[http::header::AUTHORIZATION],
+		"Bearer synthetic-provider-key"
+	);
+	let claims = req.extensions().get::<super::Claims>().unwrap();
+	assert_eq!(claims.inner["iss"], issuer);
+	assert!(claims.jwt.expose_secret().is_empty());
+	let expression = crate::cel::Expression::new_strict("jwt.rawToken.unredacted()").unwrap();
+	assert_eq!(
+		crate::cel::Executor::new_request(&req)
+			.eval(&expression)
+			.unwrap()
+			.json()
+			.unwrap(),
+		json!("")
+	);
+	let dump = serde_json::to_value(&jwt).unwrap();
+	assert_eq!(dump["providers"][0]["validationSummaryVersion"], 2);
+	assert_eq!(
+		dump["providers"][0]["validation"][kid]["nonForwardableToken"],
+		true
+	);
+}
+
+#[tokio::test]
+async fn non_forwardable_token_rejects_duplicate_carriers() {
+	let (jwt, kid, issuer, aud) = setup_test_jwt_with_options(JWTValidationOptions {
+		non_forwardable_token: true,
+		..Default::default()
+	});
+	let token = build_signed_token(kid, issuer, aud, 4_102_444_800);
+	let mut req = crate::http::Request::new(crate::http::Body::empty());
+	for _ in 0..2 {
+		req.headers_mut().append(
+			http::header::AUTHORIZATION,
+			format!("Bearer {token}").parse().unwrap(),
+		);
+	}
+	assert!(matches!(
+		jwt.apply(None, &mut req).await,
+		Err(TokenError::AmbiguousCredentialCarrier)
+	));
+	assert!(req.extensions().get::<super::Claims>().is_none());
+}
+
+#[tokio::test]
+async fn non_forwardable_token_rejects_conflicting_programmatic_configuration() {
+	use crate::http::auth::AuthorizationLocation;
+	let (base, _, _, _) = setup_test_jwt_with_options(JWTValidationOptions {
+		non_forwardable_token: true,
+		..Default::default()
+	});
+	let mut variants = Vec::new();
+	for mode in [Mode::Optional, Mode::Permissive] {
+		let mut jwt = base.clone();
+		jwt.mode = mode;
+		variants.push(jwt);
+	}
+	let mut jwt = base.clone();
+	jwt.preserve_token = true;
+	variants.push(jwt);
+	for location in [
+		AuthorizationLocation::QueryParameter {
+			name: "token".into(),
+		},
+		AuthorizationLocation::Cookie {
+			name: "token".into(),
+		},
+		AuthorizationLocation::Expression(std::sync::Arc::new(
+			crate::cel::Expression::new_strict("'token'").unwrap(),
+		)),
+	] {
+		let mut jwt = base.clone();
+		jwt.location = location;
+		variants.push(jwt);
+	}
+	// An empty key set must not erase the retention constraint.
+	let provider = Provider::from_jwks(
+		serde_json::from_value(json!({"keys":[]})).unwrap(),
+		"issuer".into(),
+		None,
+		JWTValidationOptions {
+			non_forwardable_token: true,
+			..Default::default()
+		},
+	)
+	.unwrap();
+	variants.push(Jwt::from_providers(
+		vec![provider],
+		Mode::Optional,
+		bearer_location(),
+		false,
+	));
+	for jwt in variants {
+		let mut req = crate::http::Request::new(crate::http::Body::empty());
+		assert!(matches!(
+			jwt.apply(None, &mut req).await,
+			Err(TokenError::InvalidCredentialRetention)
+		));
+	}
+}
+
+#[tokio::test]
+async fn non_forwardable_token_local_conflicts_rejected_before_loading_keys() {
+	for extra in [
+		json!({"mode":"optional"}),
+		json!({"mode":"permissive"}),
+		json!({"preserveToken":true}),
+		json!({"location":{"queryParameter":{"name":"token"}}}),
+		json!({"location":{"expression":"'token'"}}),
+	] {
+		let mut config = json!({"mode":"strict", "issuer":"synthetic-issuer", "jwks":{"file":"/nonexistent-must-not-be-read"}, "jwtValidationOptions":{"nonForwardableToken":true}});
+		config
+			.as_object_mut()
+			.unwrap()
+			.extend(extra.as_object().unwrap().clone());
+		let local: LocalJwtConfig = serde_json::from_value(config).unwrap();
+		assert!(matches!(
+			local
+				.try_into(&crate::resource_manager::ResourceFetcher::files_only())
+				.await,
+			Err(JwkError::InvalidCredentialRetention)
+		));
+	}
+}
+
+#[test]
+fn credential_errors_do_not_render_untrusted_values_or_sources() {
+	use std::error::Error;
+	let sentinel = "synthetic-sensitive-input";
+	for error in [
+		TokenError::UnknownKeyId(sentinel.into()),
+		TokenError::CredentialRemoval(sentinel.into()),
+	] {
+		assert!(!format!("{error} {error:?}").contains(sentinel));
+		assert!(error.source().is_none());
+	}
+	let parse = serde_json::from_str::<jsonwebtoken::jwk::JwkSet>(sentinel).unwrap_err();
+	for error in [
+		JwkError::JwksParseError(parse),
+		JwkError::JwkLoadError(anyhow::anyhow!(sentinel)),
+		JwkError::UnexpectedAlgorithm {
+			key_id: sentinel.into(),
+			algorithm: jsonwebtoken::jwk::AlgorithmParameters::OctetKey(
+				jsonwebtoken::jwk::OctetKeyParameters {
+					key_type: jsonwebtoken::jwk::OctetKeyType::Octet,
+					value: sentinel.into(),
+				},
+			),
+		},
+	] {
+		assert!(!format!("{error} {error:?}").contains(sentinel));
+		assert!(error.source().is_none());
+	}
 }

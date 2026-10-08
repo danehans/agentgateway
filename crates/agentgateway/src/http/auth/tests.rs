@@ -410,6 +410,46 @@ async fn test_backend_auth_passthrough_happy_path() {
 }
 
 #[tokio::test]
+async fn non_forwardable_token_blocks_passthrough_but_allows_independent_backend_key() {
+	let t = setup_proxy_test("{}").unwrap();
+	let backend_info = BackendInfo {
+		call_target: Target::Address("0.0.0.0:80".parse().unwrap()),
+		target: BackendTarget::Backend {
+			name: Default::default(),
+			namespace: Default::default(),
+			section: None,
+		},
+		inputs: t.inputs(),
+	};
+	let mut req = crate::http::Request::new(crate::http::Body::empty());
+	req.extensions_mut().insert(Claims {
+		inner: Map::new(),
+		jwt: SecretString::new("".into()),
+	});
+	let auth = BackendAuth::new(BackendAuthKind::Passthrough { location: None });
+	let err = apply_backend_auth(&backend_info, &auth, &mut req)
+		.await
+		.unwrap_err();
+	assert!(
+		err
+			.to_string()
+			.contains("not available for backend forwarding")
+	);
+	assert!(!req.headers().contains_key(http::header::AUTHORIZATION));
+	let auth = BackendAuth::new(BackendAuthKind::Key {
+		value: SecretString::new("synthetic-provider-key".into()),
+		location: None,
+	});
+	apply_backend_auth(&backend_info, &auth, &mut req)
+		.await
+		.unwrap();
+	assert_eq!(
+		req.headers()[http::header::AUTHORIZATION],
+		"Bearer synthetic-provider-key"
+	);
+}
+
+#[tokio::test]
 async fn test_backend_auth_key() {
 	// Test Key authentication
 	let mut req = crate::http::Request::new(crate::http::Body::empty());

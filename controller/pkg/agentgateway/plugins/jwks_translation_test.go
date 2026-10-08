@@ -303,9 +303,10 @@ func TestJWTValidationProfileReachesTrafficAndMCPPolicies(t *testing.T) {
 		ExpectedTokenType:       &typ,
 		MaxTokenLifetimeSeconds: &lifetime,
 		RequiredStringClaims:    []agentgateway.JWTStringClaim{"execution_id", "workload_id", "jti"},
+		NonForwardableToken:     true,
 	}
 	translated := translateJWTValidationOptions(opts)
-	if translated.ExpectedTokenType == nil || translated.GetExpectedTokenType() != typ || translated.MaxTokenLifetimeSeconds == nil || translated.GetMaxTokenLifetimeSeconds() != lifetime {
+	if !translated.GetNonForwardableToken() || translated.ExpectedTokenType == nil || translated.GetExpectedTokenType() != typ || translated.MaxTokenLifetimeSeconds == nil || translated.GetMaxTokenLifetimeSeconds() != lifetime {
 		t.Fatalf("typed profile was lost during translation: %v", translated)
 	}
 	if len(translated.GetRequiredClaims()) != 0 || len(translated.GetRequiredStringClaims()) != 3 {
@@ -321,7 +322,7 @@ func TestJWTValidationProfileReachesTrafficAndMCPPolicies(t *testing.T) {
 		t.Fatal(err)
 	}
 	applied := policy.GetTraffic().GetJwt().GetProviders()[0].GetJwtValidationOptions()
-	if applied.GetExpectedTokenType() != typ || applied.GetMaxTokenLifetimeSeconds() != lifetime || len(applied.GetRequiredStringClaims()) != 3 {
+	if !applied.GetNonForwardableToken() || applied.GetExpectedTokenType() != typ || applied.GetMaxTokenLifetimeSeconds() != lifetime || len(applied.GetRequiredStringClaims()) != 3 {
 		t.Fatalf("traffic policy lost typed profile: %v", applied)
 	}
 	mcpAuth := &agentgateway.MCPAuthentication{
@@ -344,7 +345,7 @@ func TestJWTValidationProfileReachesTrafficAndMCPPolicies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := mcp.GetJwtValidationOptions(); got.GetExpectedTokenType() != typ || got.GetMaxTokenLifetimeSeconds() != lifetime || len(got.GetRequiredStringClaims()) != 3 {
+	if got := mcp.GetJwtValidationOptions(); !got.GetNonForwardableToken() || got.GetExpectedTokenType() != typ || got.GetMaxTokenLifetimeSeconds() != lifetime || len(got.GetRequiredStringClaims()) != 3 {
 		t.Fatalf("MCP policy lost typed profile: %v", got)
 	}
 	*opts.ExpectedTokenType = "changed-type"

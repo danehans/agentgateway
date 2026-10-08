@@ -536,6 +536,7 @@
 |`binds[].listeners[].routes[].policies.mcpAuthentication.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`binds[].listeners[].routes[].policies.mcpAuthentication.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`binds[].listeners[].routes[].policies.mcpAuthentication.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`binds[].listeners[].routes[].policies.mcpAuthentication.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`binds[].listeners[].routes[].policies.mcpAuthentication.clientId`|string|OAuth client ID advertised to MCP clients when needed.|
 |`binds[].listeners[].routes[].policies.mcpAuthentication.clientSecret`|string|OAuth client secret injected into proxied token requests for confidential clients.<br>Currently used by the `entra` provider, whose Web-platform app registrations require a<br>client secret at the token endpoint.|
 |`binds[].listeners[].routes[].policies.a2a`|object|Mark this traffic as A2A to enable A2A processing and telemetry.|
@@ -4412,6 +4413,7 @@
 |`binds[].listeners[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`binds[].listeners[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`binds[].listeners[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`binds[].listeners[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`binds[].listeners[].routes[].policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`binds[].listeners[].routes[].policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`binds[].listeners[].routes[].policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -4422,6 +4424,7 @@
 |`binds[].listeners[].routes[].policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`binds[].listeners[].routes[].policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`binds[].listeners[].routes[].policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`binds[].listeners[].routes[].policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`binds[].listeners[].routes[].policies.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`binds[].listeners[].routes[].policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
 |`binds[].listeners[].routes[].policies.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
@@ -19114,6 +19117,7 @@
 |`binds[].listeners[].policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`binds[].listeners[].policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`binds[].listeners[].policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`binds[].listeners[].policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`binds[].listeners[].policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`binds[].listeners[].policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`binds[].listeners[].policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -19124,6 +19128,7 @@
 |`binds[].listeners[].policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`binds[].listeners[].policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`binds[].listeners[].policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`binds[].listeners[].policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`binds[].listeners[].policies.authorization`|object|Authorization rules for incoming HTTP requests.|
 |`binds[].listeners[].policies.authorization.rules`|[]object|CEL authorization rules to evaluate for a request.|
 |`binds[].listeners[].policies.authorization.rules[].allow`|string|Allow the request when this CEL expression is true.|
@@ -22307,6 +22312,7 @@
 |`policies[].policy.mcpAuthentication.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`policies[].policy.mcpAuthentication.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`policies[].policy.mcpAuthentication.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`policies[].policy.mcpAuthentication.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`policies[].policy.mcpAuthentication.clientId`|string|OAuth client ID advertised to MCP clients when needed.|
 |`policies[].policy.mcpAuthentication.clientSecret`|string|OAuth client secret injected into proxied token requests for confidential clients.<br>Currently used by the `entra` provider, whose Web-platform app registrations require a<br>client secret at the token endpoint.|
 |`policies[].policy.a2a`|object|Mark this traffic as A2A to enable A2A processing and telemetry.|
@@ -26183,6 +26189,7 @@
 |`policies[].policy.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`policies[].policy.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`policies[].policy.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`policies[].policy.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`policies[].policy.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`policies[].policy.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`policies[].policy.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -26193,6 +26200,7 @@
 |`policies[].policy.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`policies[].policy.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`policies[].policy.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`policies[].policy.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`policies[].policy.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`policies[].policy.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
 |`policies[].policy.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
@@ -40930,6 +40938,7 @@
 |`routeGroups[].routes[].policies.mcpAuthentication.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`routeGroups[].routes[].policies.mcpAuthentication.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`routeGroups[].routes[].policies.mcpAuthentication.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`routeGroups[].routes[].policies.mcpAuthentication.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`routeGroups[].routes[].policies.mcpAuthentication.clientId`|string|OAuth client ID advertised to MCP clients when needed.|
 |`routeGroups[].routes[].policies.mcpAuthentication.clientSecret`|string|OAuth client secret injected into proxied token requests for confidential clients.<br>Currently used by the `entra` provider, whose Web-platform app registrations require a<br>client secret at the token endpoint.|
 |`routeGroups[].routes[].policies.a2a`|object|Mark this traffic as A2A to enable A2A processing and telemetry.|
@@ -44806,6 +44815,7 @@
 |`routeGroups[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`routeGroups[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`routeGroups[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`routeGroups[].routes[].policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`routeGroups[].routes[].policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`routeGroups[].routes[].policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`routeGroups[].routes[].policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -44816,6 +44826,7 @@
 |`routeGroups[].routes[].policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`routeGroups[].routes[].policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`routeGroups[].routes[].policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`routeGroups[].routes[].policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`routeGroups[].routes[].policies.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`routeGroups[].routes[].policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
 |`routeGroups[].routes[].policies.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
@@ -59215,6 +59226,7 @@
 |`gateways.*.listeners[].jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`gateways.*.listeners[].jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`gateways.*.listeners[].jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`gateways.*.listeners[].jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`gateways.*.listeners[].jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`gateways.*.listeners[].jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`gateways.*.listeners[].jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -59225,6 +59237,7 @@
 |`gateways.*.listeners[].jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`gateways.*.listeners[].jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`gateways.*.listeners[].jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`gateways.*.listeners[].jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`gateways.*.listeners[].authorization`|object|Authorization rules for incoming HTTP requests.|
 |`gateways.*.listeners[].authorization.rules`|[]object|CEL authorization rules to evaluate for a request.|
 |`gateways.*.listeners[].authorization.rules[].allow`|string|Allow the request when this CEL expression is true.|
@@ -60552,6 +60565,7 @@
 |`gateways.*.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`gateways.*.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`gateways.*.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`gateways.*.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`gateways.*.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`gateways.*.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`gateways.*.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -60562,6 +60576,7 @@
 |`gateways.*.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`gateways.*.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`gateways.*.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`gateways.*.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`gateways.*.authorization`|object|Authorization rules for incoming HTTP requests.|
 |`gateways.*.authorization.rules`|[]object|CEL authorization rules to evaluate for a request.|
 |`gateways.*.authorization.rules[].allow`|string|Allow the request when this CEL expression is true.|
@@ -62236,6 +62251,7 @@
 |`routes[].policies.mcpAuthentication.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`routes[].policies.mcpAuthentication.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`routes[].policies.mcpAuthentication.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`routes[].policies.mcpAuthentication.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`routes[].policies.mcpAuthentication.clientId`|string|OAuth client ID advertised to MCP clients when needed.|
 |`routes[].policies.mcpAuthentication.clientSecret`|string|OAuth client secret injected into proxied token requests for confidential clients.<br>Currently used by the `entra` provider, whose Web-platform app registrations require a<br>client secret at the token endpoint.|
 |`routes[].policies.a2a`|object|Mark this traffic as A2A to enable A2A processing and telemetry.|
@@ -66112,6 +66128,7 @@
 |`routes[].policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`routes[].policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`routes[].policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`routes[].policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`routes[].policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`routes[].policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`routes[].policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -66122,6 +66139,7 @@
 |`routes[].policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`routes[].policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`routes[].policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`routes[].policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`routes[].policies.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`routes[].policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
 |`routes[].policies.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
@@ -84888,6 +84906,7 @@
 |`llm.policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`llm.policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`llm.policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`llm.policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`llm.policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`llm.policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`llm.policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -84898,6 +84917,7 @@
 |`llm.policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`llm.policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`llm.policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`llm.policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`llm.policies.authorization`|object|Authorization rules for incoming HTTP requests.|
 |`llm.policies.authorization.rules`|[]object|CEL authorization rules to evaluate for a request.|
 |`llm.policies.authorization.rules[].allow`|string|Allow the request when this CEL expression is true.|
@@ -89743,6 +89763,7 @@
 |`mcp.policies.mcpAuthentication.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`mcp.policies.mcpAuthentication.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`mcp.policies.mcpAuthentication.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`mcp.policies.mcpAuthentication.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`mcp.policies.mcpAuthentication.clientId`|string|OAuth client ID advertised to MCP clients when needed.|
 |`mcp.policies.mcpAuthentication.clientSecret`|string|OAuth client secret injected into proxied token requests for confidential clients.<br>Currently used by the `entra` provider, whose Web-platform app registrations require a<br>client secret at the token endpoint.|
 |`mcp.policies.a2a`|object|Mark this traffic as A2A to enable A2A processing and telemetry.|
@@ -93619,6 +93640,7 @@
 |`mcp.policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`mcp.policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`mcp.policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`mcp.policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`mcp.policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`mcp.policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`mcp.policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -93629,6 +93651,7 @@
 |`mcp.policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`mcp.policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`mcp.policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`mcp.policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`mcp.policies.oidc`|object|Authenticate browser requests with OIDC authorization code flow.|
 |`mcp.policies.oidc.issuer`|string|Issuer used for discovery and ID token validation.|
 |`mcp.policies.oidc.discovery`|object|Optional discovery document override. If omitted, discovery uses<br>`${issuer}/.well-known/openid-configuration`.|
@@ -95833,6 +95856,7 @@
 |`ui.policies.jwtAuth.providers[].jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`ui.policies.jwtAuth.providers[].jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`ui.policies.jwtAuth.providers[].jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`ui.policies.jwtAuth.providers[].jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`ui.policies.jwtAuth.issuer`|string|Expected token issuer. The JWT `iss` claim is required and must match.|
 |`ui.policies.jwtAuth.audiences`|[]string|Accepted token audiences. A non-empty list requires a matching JWT `aud` claim.|
 |`ui.policies.jwtAuth.jwks`|object|JSON Web Key Set used to verify token signatures. Can be inline, from a file, or fetched remotely.|
@@ -95843,6 +95867,7 @@
 |`ui.policies.jwtAuth.jwtValidationOptions.expectedTokenType`|string|Exact, case-sensitive JWT header `typ`. Omission preserves legacy behavior.|
 |`ui.policies.jwtAuth.jwtValidationOptions.maxTokenLifetimeSeconds`|integer|Require integer `iat` and `exp`, no future issuance, no expiry leeway,<br>and a positive lifetime at most this many seconds (1 to 86,400).|
 |`ui.policies.jwtAuth.jwtValidationOptions.requiredStringClaims`|[]string|Application claims that must be nonempty strings of at most 512 UTF-8<br>bytes without control characters. Values still require authorization policy.|
+|`ui.policies.jwtAuth.jwtValidationOptions.nonForwardableToken`|boolean|Discard raw token access after validation. Requires strict header<br>authentication and preserveToken=false. Verified claims remain available.|
 |`ui.policies.authorization`|object|Authorization rules for incoming HTTP requests.|
 |`ui.policies.authorization.rules`|[]object|CEL authorization rules to evaluate for a request.|
 |`ui.policies.authorization.rules[].allow`|string|Allow the request when this CEL expression is true.|

@@ -4954,6 +4954,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "nonForwardableToken": {
+          "description": "Discard raw token access after validation. Requires strict header\nauthentication and preserveToken=false. Verified claims remain available.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
