@@ -70,7 +70,7 @@ impl LegacySSEService {
 		let mut ctx = crate::mcp::upstream::IncomingRequestContext::new(&part);
 		*ctx.request.body_mut() = Some(bytes);
 
-		let Some(mut session) = self.session_manager.get_session(&session_id, inputs) else {
+		let Some(mut session) = self.session_manager.get_session(&session_id, inputs, &ctx) else {
 			return mcp::Error::UnknownSession.into();
 		};
 
@@ -109,7 +109,7 @@ impl LegacySSEService {
 		// We will return the sessionId, and all future responses will get sent on the rx channel to send to this channel.
 		let (session, rx) = self
 			.session_manager
-			.create_legacy_session(backend_id, relay, idle_ttl);
+			.create_legacy_session(backend_id, relay, idle_ttl, &ctx)?;
 		let mut base_url = parts
 			.extensions
 			.get::<filters::OriginalUrl>()
@@ -143,13 +143,15 @@ impl LegacySSEService {
 				.into_response(),
 			None => Sse::new(stream).into_response(),
 		};
-		Ok(sse.map(|body| {
+		let session_for_guard = session.clone();
+		let response = sse.map(|body| {
 			crate::http::Body::new(body).with_drop_guard(session::dropper(
 				self.session_manager.clone(),
 				session,
 				parts,
 			))
-		}))
+		});
+		session_for_guard.protect_response(&ctx, response)
 	}
 }
 

@@ -239,6 +239,7 @@ impl Upstream {
 		target_name: &str,
 		ctx: &IncomingRequestContext,
 	) -> Result<(), UpstreamError> {
+		super::ownership::validate_context(ctx)?;
 		if matches!(self, Upstream::OpenAPI(_))
 			|| matches!(self, Upstream::McpStreamable(c) if !c.has_session_id())
 		{
@@ -277,6 +278,7 @@ impl Upstream {
 		target_name: &str,
 		ctx: &IncomingRequestContext,
 	) -> Result<mergestream::Messages, UpstreamError> {
+		super::ownership::validate_context(ctx)?;
 		if matches!(self, Upstream::McpStdio(_) | Upstream::OpenAPI(_)) {
 			return match self {
 				Upstream::McpStdio(c) => Ok(c.get_event_stream().await?),
@@ -311,6 +313,7 @@ impl Upstream {
 		mut request: JsonRpcRequest<ClientRequest>,
 		ctx: &IncomingRequestContext,
 	) -> Result<mergestream::Messages, UpstreamError> {
+		super::ownership::validate_context(ctx)?;
 		let method = request.request.method().to_string();
 		let (operation_target, tool_name) = match &request.request {
 			ClientRequest::CallToolRequest(request) => {
@@ -387,6 +390,7 @@ impl Upstream {
 		mut request: ClientNotification,
 		ctx: &IncomingRequestContext,
 	) -> Result<(), UpstreamError> {
+		super::ownership::validate_context(ctx)?;
 		if matches!(self, Upstream::OpenAPI(_)) {
 			return Ok(());
 		}
@@ -430,6 +434,7 @@ impl Upstream {
 		message: ClientJsonRpcMessage,
 		ctx: &IncomingRequestContext,
 	) -> Result<(), UpstreamError> {
+		super::ownership::validate_context(ctx)?;
 		if matches!(self, Upstream::OpenAPI(_)) {
 			return Err(UpstreamError::InvalidRequest(
 				"openapi upstream does not support server-to-client routing".into(),

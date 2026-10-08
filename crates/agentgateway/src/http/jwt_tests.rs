@@ -322,7 +322,7 @@ fn setup_test_jwt_with_required_claims(
 	})
 }
 
-fn setup_test_jwt_with_options(
+pub(crate) fn setup_test_jwt_with_options(
 	options: JWTValidationOptions,
 ) -> (Jwt, &'static str, &'static str, &'static str) {
 	let jwks = json!({
@@ -373,7 +373,7 @@ fn build_signed_token_with_payload(kid: &str, payload: serde_json::Value) -> Str
 	build_signed_token_with_type(kid, payload, Some("JWT"))
 }
 
-fn build_signed_token_with_type(
+pub(crate) fn build_signed_token_with_type(
 	kid: &str,
 	payload: serde_json::Value,
 	typ: Option<&str>,
@@ -1683,4 +1683,178 @@ fn credential_errors_do_not_render_untrusted_values_or_sources() {
 		assert!(!format!("{error} {error:?}").contains(sentinel));
 		assert!(error.source().is_none());
 	}
+}
+
+#[tokio::test]
+async fn mcp_verified_owner_uses_signed_profile_and_stable_claims() {
+	let mut options = traffic_profile_options();
+	options.non_forwardable_token = true;
+	options.required_string_claims.insert("sub".into());
+	let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(options.clone());
+	let now = jsonwebtoken::get_current_timestamp();
+	let payload = json!({"iss": issuer, "aud": audience, "sub": "actor-a", "iat": now,
+		"exp": now + 60, "workload_id": "uid-a", "execution_id": "exec-a", "jti": "one"});
+	let signed = |value| build_signed_token_with_type(kid, value, Some("runtime-traffic+jwt"));
+	let verified = jwt
+		.validate_claims_with_identity(&signed(payload.clone()))
+		.unwrap();
+	let original = verified.1.as_ref().unwrap();
+	assert!(original.owner().is_some());
+	let mut renewal = payload.clone();
+	renewal["jti"] = json!("two");
+	renewal["exp"] = json!(now + 120);
+	let renewed = jwt.validate_claims_with_identity(&signed(renewal)).unwrap();
+	assert_eq!(original.owner(), renewed.1.as_ref().unwrap().owner());
+	assert_ne!(
+		original.expires_at(),
+		renewed.1.as_ref().unwrap().expires_at()
+	);
+	for (name, value) in [
+		("sub", "actor-b"),
+		("workload_id", "uid-b"),
+		("execution_id", "exec-b"),
+	] {
+		let mut changed = payload.clone();
+		changed[name] = json!(value);
+		assert_ne!(
+			original.owner(),
+			jwt
+				.validate_claims_with_identity(&signed(changed))
+				.unwrap()
+				.1
+				.as_ref()
+				.unwrap()
+				.owner()
+		);
+	}
+	let copied: super::Claims =
+		serde_json::from_value(serde_json::to_value(&verified.0).unwrap()).unwrap();
+	assert_eq!(copied.inner, verified.0.inner);
+	assert!(
+		serde_json::to_value(&copied)
+			.unwrap()
+			.get("verifiedMcpIdentity")
+			.is_none()
+	);
+	assert!(
+		jwt
+			.validate_claims_with_identity(&signed({
+				let mut p = payload.clone();
+				p["exp"] = json!(now);
+				p
+			}))
+			.is_err()
+	);
+	options.max_token_lifetime_seconds = Some(240);
+	let changed = setup_test_jwt_with_options(options).0;
+	assert_ne!(
+		original.owner(),
+		changed
+			.validate_claims_with_identity(&signed(payload.clone()))
+			.unwrap()
+			.1
+			.as_ref()
+			.unwrap()
+			.owner()
+	);
+	let mut req = crate::http::Request::new(crate::http::Body::empty());
+	req.headers_mut().insert(
+		"authorization",
+		format!("Bearer {}", signed(payload)).parse().unwrap(),
+	);
+	jwt.apply(None, &mut req).await.unwrap();
+	assert_eq!(
+		req.extensions().get::<super::VerifiedMcpIdentity>(),
+		Some(original)
+	);
+	assert!(!req.headers().contains_key("authorization"));
+}
+
+#[test]
+fn mcp_nonforwardable_incomplete_profile_cannot_fall_back_to_unowned_state() {
+	for missing in ["type", "lifetime", "subject"] {
+		let mut options = traffic_profile_options();
+		options.non_forwardable_token = true;
+		options.required_string_claims.insert("sub".into());
+		match missing {
+			"type" => options.expected_token_type = None,
+			"lifetime" => options.max_token_lifetime_seconds = None,
+			_ => {
+				options.required_string_claims.remove("sub");
+			},
+		}
+		let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(options);
+		let now = jsonwebtoken::get_current_timestamp();
+		let payload = json!({"iss": issuer, "aud": audience, "sub": "actor", "iat": now,
+			"exp": now + 60, "workload_id": "uid", "execution_id": "exec", "jti": "id"});
+		let claims = jwt
+			.validate_claims_with_identity(&build_signed_token_with_type(
+				kid,
+				payload,
+				Some("runtime-traffic+jwt"),
+			))
+			.unwrap();
+		assert!(claims.1.as_ref().unwrap().owner().is_none(), "{missing}");
+	}
+}
+
+#[tokio::test]
+async fn mcp_verified_owner_cannot_be_downgraded_or_shadowed_by_later_jwt() {
+	let mut options = traffic_profile_options();
+	options.non_forwardable_token = true;
+	options.required_string_claims.insert("sub".into());
+	let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(options.clone());
+	let now = jsonwebtoken::get_current_timestamp();
+	let payload = json!({"iss":issuer,"aud":audience,"sub":"a","workload_id":"a",
+		"execution_id":"exec-a","iat":now,"exp":now+60,"jti":"one"});
+	let signed = |p| build_signed_token_with_type(kid, p, Some("runtime-traffic+jwt"));
+	let mut req = crate::http::Request::new(crate::http::Body::empty());
+	req.headers_mut().insert(
+		"authorization",
+		format!("Bearer {}", signed(payload.clone()))
+			.parse()
+			.unwrap(),
+	);
+	jwt.apply(None, &mut req).await.unwrap();
+	let original = req
+		.extensions()
+		.get::<super::VerifiedMcpIdentity>()
+		.unwrap()
+		.clone();
+	for downgrade in [false, true] {
+		let mut next = payload.clone();
+		next["sub"] = json!("b");
+		req.headers_mut().insert(
+			"authorization",
+			format!("Bearer {}", signed(next)).parse().unwrap(),
+		);
+		let mut next_options = options.clone();
+		next_options.non_forwardable_token = !downgrade;
+		let next_jwt = setup_test_jwt_with_options(next_options).0;
+		assert_eq!(
+			next_jwt.apply(None, &mut req).await,
+			Err(TokenError::SessionIdentityReplacement)
+		);
+		assert_eq!(
+			req.extensions().get::<super::VerifiedMcpIdentity>(),
+			Some(&original)
+		);
+		assert_eq!(
+			req.extensions().get::<super::Claims>().unwrap().inner["sub"],
+			"a"
+		);
+	}
+	let mut renewal = payload;
+	renewal["jti"] = json!("two");
+	renewal["exp"] = json!(now + 120);
+	req.headers_mut().insert(
+		"authorization",
+		format!("Bearer {}", signed(renewal)).parse().unwrap(),
+	);
+	jwt.apply(None, &mut req).await.unwrap();
+	assert_eq!(
+		req.extensions().get::<super::VerifiedMcpIdentity>(),
+		Some(&original),
+		"same-request policies retain the stricter expiry"
+	);
 }

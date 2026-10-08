@@ -4,6 +4,7 @@ pub(crate) mod dns_rebinding;
 pub(crate) mod guardrails;
 mod handler;
 mod mergestream;
+mod ownership;
 mod rbac;
 mod router;
 mod session;

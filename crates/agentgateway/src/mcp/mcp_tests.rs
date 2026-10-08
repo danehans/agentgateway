@@ -984,7 +984,13 @@ async fn stateless_multiplex_delete_session_skips_uninitialized_targets() {
 	.unwrap();
 	let session_manager =
 		super::session::SessionManager::new(http::sessionpersistence::Encoder::base64());
-	let mut session = session_manager.create_stateless_session(relay);
+	let mut session = session_manager
+		.create_stateless_session(
+			relay,
+			crate::types::agent::ResourceName::new("synthetic".into(), "test".into()),
+			&crate::mcp::upstream::IncomingRequestContext::empty(),
+		)
+		.unwrap();
 	let parts = ::http::Request::<()>::builder()
 		.method(http::Method::POST)
 		.uri("http://localhost/mcp")
@@ -8914,5 +8920,283 @@ async fn mcp_guardrails_invocation_identity_pairs_hooks_and_separates_calls() {
 	assert_ne!(requests[0], requests[1]);
 	for value in requests.iter() {
 		assert!(!uuid::Uuid::parse_str(value).unwrap().is_nil());
+	}
+}
+
+mod owned_session_tests {
+	use std::collections::HashSet;
+
+	use rmcp::transport::common::http_header::HEADER_SESSION_ID;
+	use serde_json::{Value, json};
+
+	use super::*;
+	use crate::http::jwt::tests::{build_signed_token_with_type, setup_test_jwt_with_options};
+	use crate::http::jwt::{JWTValidationOptions, Jwt};
+	use crate::mcp::handler::RelayInputs;
+	use crate::mcp::session::SessionManager;
+	use crate::mcp::streamablehttp::{StreamableHttpServerConfig, StreamableHttpService};
+	use crate::mcp::upstream::IncomingRequestContext;
+
+	struct Fixture {
+		pi: Arc<ProxyInputs>,
+		upstream: MockServer,
+		capture: HeaderCapture,
+		manager: Arc<SessionManager>,
+		jwt: Jwt,
+		kid: &'static str,
+		issuer: &'static str,
+		audience: &'static str,
+	}
+	impl Fixture {
+		async fn new() -> Self {
+			let (jwt, kid, issuer, audience) = setup_test_jwt_with_options(JWTValidationOptions {
+				non_forwardable_token: true,
+				expected_token_type: Some("runtime-traffic+jwt".into()),
+				max_token_lifetime_seconds: Some(300),
+				required_string_claims: HashSet::from(
+					[
+						"sub",
+						"workload_id",
+						"execution_id",
+						"origin_config",
+						"target",
+						"jti",
+					]
+					.map(str::to_owned),
+				),
+				..Default::default()
+			});
+			let (upstream, capture) = mock_streamable_http_server_with_capture(true).await;
+			Self {
+				pi: setup_proxy_test("{}").unwrap().pi,
+				upstream,
+				capture,
+				manager: SessionManager::new(http::sessionpersistence::Encoder::base64()),
+				jwt,
+				kid,
+				issuer,
+				audience,
+			}
+		}
+		fn calls(&self) -> usize {
+			self.capture.lock().unwrap().len()
+		}
+		fn inputs(&self) -> RelayInputs {
+			RelayInputs {
+				backend_id: crate::types::agent::ResourceName::new("shared".into(), "test".into()),
+				backend: McpBackendGroup {
+					targets: vec![fake_streamable_target("a", self.upstream.addr)],
+					..Default::default()
+				},
+				policies: empty_mcp_policies(),
+				mcp_guardrails: None,
+				client: PolicyClient::new(self.pi.clone()),
+			}
+		}
+		async fn request(
+			&self,
+			actor: &str,
+			execution: &str,
+			message: Value,
+			id: Option<&str>,
+		) -> http::Request {
+			let now = jsonwebtoken::get_current_timestamp();
+			let token = build_signed_token_with_type(
+				self.kid,
+				json!({"iss": self.issuer, "aud": self.audience,
+				"sub": actor, "workload_id": actor, "execution_id": execution, "origin_config": "config-a",
+				"target": "shared-target", "iat": now, "exp": now + 60, "jti": uuid::Uuid::new_v4().to_string()}),
+				Some("runtime-traffic+jwt"),
+			);
+			let mut req = ::http::Request::builder()
+				.method("POST")
+				.uri("http://localhost/mcp")
+				.header("accept", "application/json, text/event-stream")
+				.header("content-type", "application/json")
+				.header("mcp-protocol-version", "2025-06-18")
+				.header("authorization", format!("Bearer {token}"))
+				.body(http::Body::from(serde_json::to_vec(&message).unwrap()))
+				.unwrap();
+			if let Some(id) = id {
+				req
+					.headers_mut()
+					.insert(HEADER_SESSION_ID, id.parse().unwrap());
+			}
+			req
+				.extensions_mut()
+				.insert(self.pi.stores.configuration_generation());
+			self.jwt.apply(None, &mut req).await.unwrap();
+			req
+		}
+		fn service(&self) -> StreamableHttpService {
+			StreamableHttpService::new(
+				self.manager.clone(),
+				StreamableHttpServerConfig {
+					stateful_mode: true,
+				},
+			)
+		}
+		async fn initialize(&self, actor: &str) -> String {
+			let req = self.request(actor, "exec-a", json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+				"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"owned-test","version":"1"}}}), None).await;
+			let response = self.service().handle(req, self.inputs()).await.unwrap();
+			let id = response.headers()[HEADER_SESSION_ID]
+				.to_str()
+				.unwrap()
+				.to_owned();
+			assert!(id.starts_with("agw-mcp-owned-v1."));
+			response.into_body().into_bytes(1024 * 1024).await.unwrap();
+			id
+		}
+	}
+	fn list() -> Value {
+		json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+	}
+
+	#[tokio::test]
+	async fn mcp_owned_cache_resume_and_delete_are_actor_execution_scoped() {
+		let f = Fixture::new().await;
+		let id = f.initialize("actor-a").await;
+		assert_eq!(f.upstream.init_count().await, 1);
+		let calls = f.calls();
+		for (actor, exec) in [("actor-b", "exec-a"), ("actor-a", "exec-b")] {
+			let req = f.request(actor, exec, list(), Some(&id)).await;
+			assert!(f.service().handle(req, f.inputs()).await.is_err());
+			let mut delete = f.request(actor, exec, list(), Some(&id)).await;
+			*delete.method_mut() = http::Method::DELETE;
+			f.service().handle(delete, f.inputs()).await.unwrap();
+			assert_eq!(
+				f.calls(),
+				calls,
+				"foreign lookup/deletion cannot reach upstream"
+			);
+		}
+		// Renewal changes jti, but A still uses the cached upstream session.
+		let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		f.service()
+			.handle(req, f.inputs())
+			.await
+			.unwrap()
+			.into_body()
+			.into_bytes(1024 * 1024)
+			.await
+			.unwrap();
+		assert_eq!(f.upstream.init_count().await, 1);
+		f.manager.forget_for_test(&id);
+		let calls = f.calls();
+		let req = f.request("actor-b", "exec-a", list(), Some(&id)).await;
+		assert!(f.service().handle(req, f.inputs()).await.is_err());
+		assert_eq!(f.calls(), calls, "foreign resume cannot reach upstream");
+		let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		f.service()
+			.handle(req, f.inputs())
+			.await
+			.unwrap()
+			.into_body()
+			.into_bytes(1024 * 1024)
+			.await
+			.unwrap();
+		assert_eq!(
+			f.upstream.init_count().await,
+			1,
+			"resume restores the original upstream session"
+		);
+		let mut delete = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		*delete.method_mut() = http::Method::DELETE;
+		f.service().handle(delete, f.inputs()).await.unwrap();
+		assert!(
+			f.manager
+				.get_session(&id, f.inputs(), &IncomingRequestContext::empty())
+				.is_none()
+		);
+	}
+
+	#[tokio::test]
+	async fn mcp_owned_tokens_reject_forgery_restart_and_legacy_fallback() {
+		let f = Fixture::new().await;
+		let id = f.initialize("actor-a").await;
+		f.manager.forget_for_test(&id);
+		let calls = f.calls();
+		for bad in [
+			id.replace("agw-mcp-owned-v1.", ""),
+			format!("{id}A"),
+			http::sessionpersistence::SessionState::MCP(http::sessionpersistence::MCPSessionState::new(
+				vec![],
+			))
+			.encode(&http::sessionpersistence::Encoder::base64())
+			.unwrap(),
+		] {
+			let req = f.request("actor-a", "exec-a", list(), Some(&bad)).await;
+			assert!(f.service().handle(req, f.inputs()).await.is_err());
+		}
+		let service = StreamableHttpService::new(
+			SessionManager::new(http::sessionpersistence::Encoder::base64()),
+			StreamableHttpServerConfig {
+				stateful_mode: true,
+			},
+		);
+		let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		assert!(service.handle(req, f.inputs()).await.is_err());
+		let mut req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		req
+			.extensions_mut()
+			.remove::<crate::http::jwt::VerifiedMcpIdentity>();
+		assert!(f.service().handle(req, f.inputs()).await.is_err());
+		assert_eq!(f.upstream.init_count().await, 1);
+		assert_eq!(f.calls(), calls);
+	}
+
+	#[tokio::test]
+	async fn mcp_owned_configuration_change_requires_fresh_initialization() {
+		for discovery in [false, true] {
+			let f = Fixture::new().await;
+			let id = f.initialize("actor-a").await;
+			let calls = f.calls();
+			let stale_request = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+			if discovery {
+				drop(f.pi.stores.discovery.write());
+			} else {
+				drop(f.pi.stores.binds.write());
+			}
+			assert!(f.service().handle(stale_request, f.inputs()).await.is_err());
+			let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+			assert!(f.service().handle(req, f.inputs()).await.is_err());
+			f.manager.forget_for_test(&id);
+			let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+			assert!(f.service().handle(req, f.inputs()).await.is_err());
+			assert_eq!(f.upstream.init_count().await, 1);
+			assert_eq!(f.calls(), calls);
+			let fresh = f.initialize("actor-a").await;
+			assert_ne!(id, fresh);
+			assert_eq!(f.upstream.init_count().await, 2);
+		}
+	}
+
+	#[tokio::test]
+	async fn mcp_owned_get_and_backend_substitution_leave_owner_usable() {
+		let f = Fixture::new().await;
+		let id = f.initialize("actor-a").await;
+		let mut get = f.request("actor-b", "exec-a", list(), Some(&id)).await;
+		*get.method_mut() = http::Method::GET;
+		assert!(f.service().handle(get, f.inputs()).await.is_err());
+		let mut inputs = f.inputs();
+		inputs.backend_id.name = "another-backend".into();
+		let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		assert!(f.service().handle(req, inputs).await.is_err());
+		let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		f.service()
+			.handle(req, f.inputs())
+			.await
+			.unwrap()
+			.into_body()
+			.into_bytes(1024 * 1024)
+			.await
+			.unwrap();
+		f.manager.forget_for_test(&id);
+		let mut inputs = f.inputs();
+		inputs.backend_id.namespace = "foreign-namespace".into();
+		let req = f.request("actor-a", "exec-a", list(), Some(&id)).await;
+		assert!(f.service().handle(req, inputs).await.is_err());
+		assert_eq!(f.upstream.init_count().await, 1);
 	}
 }

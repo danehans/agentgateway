@@ -108,6 +108,7 @@ impl<'a> From<&'a RouteTarget> for RouteTargetRef<'a> {
 
 #[derive(Debug)]
 pub struct Store {
+	generation: uuid::Uuid,
 	ipv6_enabled: bool,
 	core_ids: Option<Vec<core_affinity::CoreId>>,
 	dynamic_ca_cert_cache: crate::DynamicCaCertCacheConfig,
@@ -616,6 +617,10 @@ impl<'a> RoutePath<'a> {
 }
 
 impl Store {
+	pub(crate) fn generation(&self) -> uuid::Uuid {
+		self.generation
+	}
+
 	fn bind_listener_single(address: std::net::SocketAddr) -> anyhow::Result<StdTcpListener> {
 		let listener =
 			StdTcpListener::bind(address).with_context(|| format!("bind listener for {address}"))?;
@@ -681,6 +686,7 @@ impl Store {
 		let (listener_change_tx, listener_change_rx) = watch::channel(0);
 		Self {
 			ipv6_enabled,
+			generation: uuid::Uuid::new_v4(),
 			dynamic_ca_cert_cache,
 			core_ids: match threading_mode {
 				crate::ThreadingMode::Multithreaded => None,
@@ -2153,7 +2159,9 @@ impl StoreUpdater {
 		self.state.read().expect("mutex acquired")
 	}
 	pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
-		self.state.write().expect("mutex acquired")
+		let mut state = self.state.write().expect("mutex acquired");
+		state.generation = uuid::Uuid::new_v4();
+		state
 	}
 	pub fn dump(&self) -> Dump {
 		let store = self.state.read().expect("mutex");
@@ -2250,7 +2258,7 @@ impl StoreUpdater {
 		route_groups: Vec<(RouteGroupKey, Vec<Route>)>,
 		prev: PreviousState,
 	) -> anyhow::Result<PreviousState> {
-		let mut s = self.state.write().expect("mutex acquired");
+		let mut s = self.write();
 		let prev_bind_keys = prev.binds.clone();
 		let mut old_binds = prev.binds;
 		let mut old_routes = prev.routes;
@@ -2369,7 +2377,7 @@ impl agent_xds::Handler<ADPResource> for StoreUpdater {
 		&self,
 		mut updates: Box<&mut dyn Iterator<Item = XdsUpdate<ADPResource>>>,
 	) -> Result<(), Vec<RejectedConfig>> {
-		let mut state = self.state.write().unwrap();
+		let mut state = self.write();
 		let mut rejects = Vec::new();
 
 		for res in updates.as_mut() {

@@ -23,6 +23,7 @@ use crate::*;
 
 #[derive(Debug)]
 pub struct Store {
+	generation: uuid::Uuid,
 	pub workloads: WorkloadStore,
 
 	pub services: ServiceStore,
@@ -30,7 +31,11 @@ pub struct Store {
 	pub self_workload: SelfWorkload,
 }
 
-impl Store {}
+impl Store {
+	pub(crate) fn generation(&self) -> uuid::Uuid {
+		self.generation
+	}
+}
 
 impl Default for Store {
 	fn default() -> Self {
@@ -41,6 +46,7 @@ impl Default for Store {
 impl Store {
 	pub fn new() -> Store {
 		Store {
+			generation: uuid::Uuid::new_v4(),
 			workloads: WorkloadStore {
 				insert_notifier: Sender::new(()),
 				by_addr: Default::default(),
@@ -635,6 +641,11 @@ impl StoreUpdater {
 	pub fn read(&self) -> std::sync::RwLockReadGuard<'_, Store> {
 		self.state.read().expect("mutex acquired")
 	}
+	pub fn write(&self) -> std::sync::RwLockWriteGuard<'_, Store> {
+		let mut state = self.state.write().expect("mutex acquired");
+		state.generation = uuid::Uuid::new_v4();
+		state
+	}
 	pub fn dump(&self) -> Dump {
 		let store = self.state.read().expect("mutex");
 		// Services all have hostname, so use that as the key
@@ -665,7 +676,7 @@ impl StoreUpdater {
 		workloads: Vec<LocalWorkload>,
 		prev: PreviousState,
 	) -> anyhow::Result<PreviousState> {
-		let mut s = self.state.write().expect("mutex acquired");
+		let mut s = self.write();
 		let mut old_workloads = prev.workloads;
 		let mut old_services = prev.services;
 		let mut next_state = PreviousState {
@@ -738,7 +749,7 @@ impl agent_xds::Handler<XdsAddress> for StoreUpdater {
 		&self,
 		updates: Box<&mut dyn Iterator<Item = agent_xds::XdsUpdate<XdsAddress>>>,
 	) -> Result<(), Vec<agent_xds::RejectedConfig>> {
-		let mut state = self.state.write().unwrap();
+		let mut state = self.write();
 		let handle = |res: XdsUpdate<XdsAddress>| {
 			match res {
 				XdsUpdate::Update(w) => state.insert_address(w.resource)?,

@@ -198,7 +198,9 @@ impl StreamableHttpService {
 		let idle_ttl = inputs.backend.session_idle_ttl;
 		let backend_id = inputs.backend_id.clone();
 		let relay = inputs.build_new_connections(&ctx)?;
-		let mut session = self.session_manager.create_session(relay);
+		let mut session = self
+			.session_manager
+			.create_session(relay, backend_id.clone(), &ctx)?;
 		let mut resp = Box::pin(session.send(ctx, message)).await?;
 
 		let Ok(sid) = session.id.parse() else {
@@ -218,9 +220,12 @@ impl StreamableHttpService {
 		message: ClientJsonRpcMessage,
 		protocol: RequestProtocol,
 	) -> Result<Response, ProxyError> {
+		let backend_id = inputs.backend_id.clone();
 		let relay = inputs.build_new_connections(&part)?;
 		// Use stateless session - not registered in session manager
-		let mut session = self.session_manager.create_stateless_session(relay);
+		let mut session = self
+			.session_manager
+			.create_stateless_session(relay, backend_id, &part)?;
 		let initialize_upstream = protocol.uses_sessions();
 		let needs_cleanup = initialize_upstream || session.has_connection_teardown();
 		// Teardown is needed when the synthetic upstream initialize may open upstream sessions,
@@ -270,11 +275,13 @@ impl StreamableHttpService {
 			return mcp::Error::SessionIdRequired.into();
 		};
 
-		let Some(session) = self.session_manager.get_session(session_id, inputs) else {
+		let session_id = session_id.to_owned();
+		let (parts, _) = request.into_parts();
+		let ctx = crate::mcp::upstream::IncomingRequestContext::new(&parts);
+		let Some(session) = self.session_manager.get_session(&session_id, inputs, &ctx) else {
 			return mcp::Error::UnknownSession.into();
 		};
 
-		let (parts, _) = request.into_parts();
 		session.get_stream(parts).await
 	}
 

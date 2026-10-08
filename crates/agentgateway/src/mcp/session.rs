@@ -38,6 +38,8 @@ use crate::{mcp, *};
 #[derive(Debug, Clone)]
 pub struct Session {
 	encoder: http::sessionpersistence::Encoder,
+	owner: Option<Arc<super::ownership::Binding>>,
+	backend_id: ResourceName,
 	relay: Arc<Relay>,
 	pub id: Arc<str>,
 	tx: Option<Sender<ServerJsonRpcMessage>>,
@@ -67,11 +69,25 @@ impl Session {
 			ClientJsonRpcMessage::Request(r) => Some(r.id.clone()),
 			_ => None,
 		};
+		let guard = super::ownership::Binding::guard(
+			&self.owner,
+			&ctx,
+			&self.backend_id,
+			&self.relay.policy_client.inputs.stores,
+		)?;
 		let res = self
 			.send_internal(ctx, message)
 			.assert_size::<{ 6 * 1024 }>()
 			.await;
-		Self::handle_error(req_id, res, false).await
+		let response = Self::handle_error(req_id, res, false).await?;
+		match guard {
+			Some(guard) => Ok(
+				guard
+					.response(response)
+					.map_err(|_| mcp::Error::UnknownSession)?,
+			),
+			None => Ok(response),
+		}
 	}
 
 	/// Send a downstream message to upstream server(s) in gateway stateless mode.
@@ -82,10 +98,19 @@ impl Session {
 	/// handshake.
 	pub async fn stateless_send_and_initialize(
 		&mut self,
-		ctx: IncomingRequestContext,
+		mut ctx: IncomingRequestContext,
 		message: ClientJsonRpcMessage,
 		initialize_upstream: bool,
 	) -> Result<Response, ProxyError> {
+		let guard = super::ownership::Binding::guard(
+			&self.owner,
+			&ctx,
+			&self.backend_id,
+			&self.relay.policy_client.inputs.stores,
+		)?;
+		if let Some(guard) = &guard {
+			ctx.extensions_mut().insert(guard.clone());
+		}
 		let req_id = match &message {
 			ClientJsonRpcMessage::Request(r) => Some(r.id.clone()),
 			_ => None,
@@ -125,12 +150,13 @@ impl Session {
 						.send_init_single(ctx.clone(), init_request, service_name)
 						.await;
 					if let Some(sessions) = self.relay.get_sessions() {
-						let s = http::sessionpersistence::SessionState::MCP(
-							http::sessionpersistence::MCPSessionState::new(sessions),
-						);
-						if let Ok(id) = s.encode(&self.encoder) {
-							self.id = id.into();
+						let state = http::sessionpersistence::MCPSessionState::new(sessions);
+						let id = match &self.owner {
+							Some(owner) => super::ownership::encode(state, owner, &self.encoder),
+							None => http::sessionpersistence::SessionState::MCP(state).encode(&self.encoder),
 						}
+						.map_err(|_| mcp::Error::InvalidSessionIdHeader)?;
+						self.id = id.into();
 					}
 					Self::handle_error(Some(RequestId::Number(0)), res, false).await?;
 					// Now send the initialized notification
@@ -176,7 +202,38 @@ impl Session {
 			Err(UpstreamError::InvalidMethod(method)) if req_id.is_some() => {
 				Err(mcp::Error::MethodNotFound(req_id, method).into())
 			},
-			other => Self::handle_error(req_id, other, true).await,
+			other => {
+				let response = Self::handle_error(req_id, other, true).await?;
+				match guard {
+					Some(guard) => Ok(
+						guard
+							.response(response)
+							.map_err(|_| mcp::Error::UnknownSession)?,
+					),
+					None => Ok(response),
+				}
+			},
+		}
+	}
+
+	pub(super) fn protect_response(
+		&self,
+		ctx: &IncomingRequestContext,
+		response: Response,
+	) -> Result<Response, ProxyError> {
+		let guard = super::ownership::Binding::guard(
+			&self.owner,
+			ctx,
+			&self.backend_id,
+			&self.relay.policy_client.inputs.stores,
+		)?;
+		match guard {
+			Some(guard) => Ok(
+				guard
+					.response(response)
+					.map_err(|_| mcp::Error::UnknownSession)?,
+			),
+			None => Ok(response),
 		}
 	}
 
@@ -367,14 +424,31 @@ impl Session {
 
 	/// get_stream establishes a stream for server-sent messages
 	pub async fn get_stream(&self, parts: Parts) -> Result<Response, ProxyError> {
-		let ctx = IncomingRequestContext::new(&parts);
+		let mut ctx = IncomingRequestContext::new(&parts);
+		let guard = super::ownership::Binding::guard(
+			&self.owner,
+			&ctx,
+			&self.backend_id,
+			&self.relay.policy_client.inputs.stores,
+		)?;
+		if let Some(guard) = &guard {
+			ctx.extensions_mut().insert(guard.clone());
+		}
 		let (log, _cel) = mcp::handler::setup_request_log(&ctx);
 		let session_id = (!self.synthetic).then(|| self.id.to_string());
 		log.non_atomic_mutate(|l| {
 			// NOTE: l.method_name keep None to respect the metrics logic: which do not want to handle GET, DELETE.
 			l.session_id = session_id;
 		});
-		Self::handle_error(None, self.relay.send_fanout_get(ctx).await, false).await
+		let response = Self::handle_error(None, self.relay.send_fanout_get(ctx).await, false).await?;
+		match guard {
+			Some(guard) => Ok(
+				guard
+					.response(response)
+					.map_err(|_| mcp::Error::UnknownSession)?,
+			),
+			None => Ok(response),
+		}
 	}
 
 	async fn handle_error(
@@ -479,6 +553,16 @@ impl Session {
 		mut ctx: IncomingRequestContext,
 		message: ClientJsonRpcMessage,
 	) -> Result<Response, UpstreamError> {
+		let guard = super::ownership::Binding::guard(
+			&self.owner,
+			&ctx,
+			&self.backend_id,
+			&self.relay.policy_client.inputs.stores,
+		)
+		.map_err(|_| UpstreamError::Unavailable("MCP session ownership is unavailable".into()))?;
+		if let Some(guard) = guard {
+			ctx.extensions_mut().insert(guard);
+		}
 		// Sending a message entails fanning out the message to each upstream, and then aggregating the responses.
 		// The responses may include any number of notifications on the same HTTP response, and then finish with the
 		// response to the request.
@@ -512,12 +596,13 @@ impl Session {
 						)
 						.await;
 						if let Some(sessions) = self.relay.get_sessions() {
-							let s = http::sessionpersistence::SessionState::MCP(
-								http::sessionpersistence::MCPSessionState::new(sessions),
-							);
-							if let Ok(id) = s.encode(&self.encoder) {
-								self.id = id.into();
+							let state = http::sessionpersistence::MCPSessionState::new(sessions);
+							let id = match &self.owner {
+								Some(owner) => super::ownership::encode(state, owner, &self.encoder),
+								None => http::sessionpersistence::SessionState::MCP(state).encode(&self.encoder),
 							}
+							.map_err(|_| UpstreamError::Unavailable("MCP session encoding failed".into()))?;
+							self.id = id.into();
 						}
 						res
 					},
@@ -853,6 +938,7 @@ fn non_empty_meta(meta: &RequestMetaObject) -> Option<&RequestMetaObject> {
 
 #[derive(Debug)]
 pub struct SessionManager {
+	owned_encoder: http::sessionpersistence::Encoder,
 	encoder: http::sessionpersistence::Encoder,
 	sessions: Arc<RwLock<HashMap<String, SessionEntry>>>,
 	idle_reaper: OnceLock<tokio::task::AbortHandle>,
@@ -864,11 +950,21 @@ fn session_id() -> Arc<str> {
 
 impl SessionManager {
 	pub fn new(encoder: http::sessionpersistence::Encoder) -> Arc<Self> {
+		let mut key = [0u8; 32];
+		crate::crypto::rand::fill(&mut key).expect("secure RNG must not fail");
+		let owned_encoder =
+			http::sessionpersistence::Encoder::aes(&hex::encode(key)).expect("32-byte AES session key");
 		Arc::new(Self {
+			owned_encoder,
 			encoder,
 			sessions: Arc::new(RwLock::new(HashMap::new())),
 			idle_reaper: OnceLock::new(),
 		})
+	}
+
+	#[cfg(test)]
+	pub(super) fn forget_for_test(&self, id: &str) {
+		self.sessions.write().expect("test session lock").remove(id);
 	}
 
 	pub fn ensure_idle_running(&self) {
@@ -877,10 +973,18 @@ impl SessionManager {
 			.get_or_init(|| tokio::spawn(run_idle_reaper(self.sessions.clone())).abort_handle());
 	}
 
-	pub fn get_session(&self, id: &str, builder: RelayInputs) -> Option<Session> {
+	pub fn get_session(
+		&self,
+		id: &str,
+		builder: RelayInputs,
+		ctx: &IncomingRequestContext,
+	) -> Option<Session> {
+		let owner =
+			super::ownership::Binding::current(ctx, &builder.backend_id, &builder.client.inputs.stores)
+				.ok()?;
 		let mut sessions = self.sessions.write().ok()?;
 		let entry = sessions.get_mut(id)?;
-		if entry.backend_id != builder.backend_id {
+		if entry.backend_id != builder.backend_id || entry.session.owner != owner {
 			return None;
 		}
 		entry.last_access = Instant::now();
@@ -893,8 +997,10 @@ impl SessionManager {
 		builder: RelayInputs,
 		ctx: &IncomingRequestContext,
 	) -> Result<Option<Session>, mcp::Error> {
+		let owner =
+			super::ownership::Binding::current(ctx, &builder.backend_id, &builder.client.inputs.stores)?;
 		if let Some(s) = self.sessions.write().expect("poisoned").get_mut(id) {
-			if s.backend_id != builder.backend_id {
+			if s.backend_id != builder.backend_id || s.session.owner != owner {
 				return Ok(None);
 			}
 			s.last_access = Instant::now();
@@ -902,10 +1008,21 @@ impl SessionManager {
 		}
 		let idle_ttl = builder.backend.session_idle_ttl;
 		let backend_id = builder.backend_id.clone();
-		let d = http::sessionpersistence::SessionState::decode(id, &self.encoder)
-			.map_err(|_| mcp::Error::InvalidSessionIdHeader)?;
-		let http::sessionpersistence::SessionState::MCP(state) = d else {
-			return Ok(None);
+		let (state, encoder) = if let Some(owner) = &owner {
+			(
+				super::ownership::decode(id, owner, &self.owned_encoder)?,
+				self.owned_encoder.clone(),
+			)
+		} else {
+			if super::ownership::is_owned(id) {
+				return Err(mcp::Error::InvalidSessionIdHeader);
+			}
+			let d = http::sessionpersistence::SessionState::decode(id, &self.encoder)
+				.map_err(|_| mcp::Error::InvalidSessionIdHeader)?;
+			let http::sessionpersistence::SessionState::MCP(state) = d else {
+				return Ok(None);
+			};
+			(state, self.encoder.clone())
 		};
 		let relay = builder.build_new_connections(ctx)?;
 		if let Err(err) = relay.set_sessions(state.sessions) {
@@ -918,7 +1035,9 @@ impl SessionManager {
 			relay: Arc::new(relay),
 			tx: None,
 			synthetic: false,
-			encoder: self.encoder.clone(),
+			encoder,
+			owner,
+			backend_id: backend_id.clone(),
 		};
 		let mut sm = self.sessions.write().expect("write lock");
 		sm.insert(
@@ -934,17 +1053,30 @@ impl SessionManager {
 	}
 
 	/// create_session establishes an MCP session.
-	pub fn create_session(&self, relay: Relay) -> Session {
+	pub fn create_session(
+		&self,
+		relay: Relay,
+		backend_id: ResourceName,
+		ctx: &IncomingRequestContext,
+	) -> Result<Session, mcp::Error> {
+		let owner =
+			super::ownership::Binding::current(ctx, &backend_id, &relay.policy_client.inputs.stores)?;
 		let id = session_id();
 
 		// Do NOT insert yet
-		Session {
+		Ok(Session {
 			id: id.clone(),
 			relay: Arc::new(relay),
 			tx: None,
 			synthetic: false,
-			encoder: self.encoder.clone(),
-		}
+			encoder: if owner.is_some() {
+				self.owned_encoder.clone()
+			} else {
+				self.encoder.clone()
+			},
+			owner,
+			backend_id,
+		})
 	}
 
 	pub fn insert_session(&self, backend_id: ResourceName, sess: Session, idle_ttl: Duration) {
@@ -964,15 +1096,15 @@ impl SessionManager {
 	/// Unlike create_session, this does NOT register the session in the session manager.
 	/// The caller is responsible for calling session.delete_session() when done
 	/// to clean up upstream resources (e.g., stdio processes).
-	pub fn create_stateless_session(&self, relay: Relay) -> Session {
-		let id = session_id();
-		Session {
-			id,
-			relay: Arc::new(relay),
-			tx: None,
-			synthetic: true,
-			encoder: self.encoder.clone(),
-		}
+	pub fn create_stateless_session(
+		&self,
+		relay: Relay,
+		backend_id: ResourceName,
+		ctx: &IncomingRequestContext,
+	) -> Result<Session, mcp::Error> {
+		let mut session = self.create_session(relay, backend_id, ctx)?;
+		session.synthetic = true;
+		Ok(session)
 	}
 
 	/// create_legacy_session establishes a legacy SSE session.
@@ -982,7 +1114,10 @@ impl SessionManager {
 		backend_id: ResourceName,
 		relay: Relay,
 		idle_ttl: Duration,
-	) -> (Session, Receiver<ServerJsonRpcMessage>) {
+		ctx: &IncomingRequestContext,
+	) -> Result<(Session, Receiver<ServerJsonRpcMessage>), mcp::Error> {
+		let owner =
+			super::ownership::Binding::current(ctx, &backend_id, &relay.policy_client.inputs.stores)?;
 		let (tx, rx) = tokio::sync::mpsc::channel(64);
 		let id = session_id();
 		let sess = Session {
@@ -990,7 +1125,13 @@ impl SessionManager {
 			relay: Arc::new(relay),
 			tx: Some(tx),
 			synthetic: false,
-			encoder: self.encoder.clone(),
+			encoder: if owner.is_some() {
+				self.owned_encoder.clone()
+			} else {
+				self.encoder.clone()
+			},
+			owner,
+			backend_id: backend_id.clone(),
 		};
 		let mut sm = self.sessions.write().expect("write lock");
 		sm.insert(
@@ -1002,19 +1143,30 @@ impl SessionManager {
 				idle_ttl,
 			},
 		);
-		(sess, rx)
+		Ok((sess, rx))
 	}
 
 	pub async fn delete_session(
 		&self,
 		backend_id: &ResourceName,
 		id: &str,
-		parts: Parts,
+		mut parts: Parts,
 	) -> Option<Response> {
 		let sess = {
 			let mut sm = self.sessions.write().expect("write lock");
-			if sm.get(id)?.backend_id != *backend_id {
+			let entry = sm.get(id)?;
+			if entry.backend_id != *backend_id {
 				return None;
+			}
+			let guard = super::ownership::Binding::guard(
+				&entry.session.owner,
+				&IncomingRequestContext::new(&parts),
+				backend_id,
+				&entry.session.relay.policy_client.inputs.stores,
+			)
+			.ok()?;
+			if let Some(guard) = guard {
+				parts.extensions.insert(guard);
 			}
 			sm.remove(id)?.session
 		};

@@ -346,6 +346,9 @@ impl RelayInputs {
 		self,
 		ctx: &upstream::IncomingRequestContext,
 	) -> Result<Relay, mcp::Error> {
+		// Refuse an unavailable owner or a request snapshot spanning a reload before
+		// constructing upstream connections (including stdio processes).
+		super::ownership::Binding::current(ctx, &self.backend_id, &self.client.inputs.stores)?;
 		let r = Relay::new_for_request(self.backend, self.policies, self.client, ctx)?;
 		Ok(Relay {
 			mcp_guardrails: self.mcp_guardrails,

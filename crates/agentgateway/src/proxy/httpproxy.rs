@@ -827,6 +827,11 @@ impl HTTPProxy {
 		log: &mut RequestLog,
 		response_policies: &mut ResponsePolicies,
 	) -> Result<Response, SnapshottedProxyResponse> {
+		// Capture before policy/routing reads, not after JWT validation. A reload
+		// during asynchronous authentication must not bless an older request view.
+		req
+			.extensions_mut()
+			.insert(self.inputs.stores.configuration_generation());
 		log.tls_info = req.extensions().get::<TLSConnectionInfo>().cloned();
 		log.backend_protocol = Some(cel::BackendProtocol::http);
 		if req.extensions().get::<EgressTlsMode>() == Some(&EgressTlsMode::InterceptDenied) {

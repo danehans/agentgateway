@@ -16,7 +16,7 @@ use crate::*;
 
 #[cfg(test)]
 #[path = "jwt_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 const TRACE_POLICY_KIND: &str = "jwt";
 
@@ -50,6 +50,8 @@ pub enum TokenError {
 	InvalidCredentialRetention,
 	#[error("non-forwardable credential carrier is ambiguous")]
 	AmbiguousCredentialCarrier,
+	#[error("JWT authentication cannot replace verified MCP session ownership")]
+	SessionIdentityReplacement,
 }
 
 impl std::fmt::Debug for TokenError {
@@ -798,6 +800,62 @@ struct UnverifiedIssuer {
 	iss: Option<String>,
 }
 
+/// Only the verifier can construct this extension. Claims deserialization and
+/// CEL projections intentionally cannot manufacture MCP session ownership.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedMcpIdentity {
+	owner: Option<[u8; 32]>,
+	expires_at: u64,
+}
+
+impl std::fmt::Debug for VerifiedMcpIdentity {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("VerifiedMcpIdentity([redacted])")
+	}
+}
+
+impl VerifiedMcpIdentity {
+	fn from_verified(provider: &Provider, key: &Jwk, claims: &Map<String, Value>) -> Self {
+		let expires_at = claims.get("exp").and_then(Value::as_u64).unwrap_or(0);
+		let profile = &key.profile;
+		let owner = if profile.expected_token_type.is_some()
+			&& profile.max_token_lifetime_seconds.is_some()
+			&& profile.required_string_claims.contains("sub")
+			&& key.validation.validate_aud
+			&& key
+				.validation
+				.aud
+				.as_ref()
+				.is_some_and(|aud| !aud.is_empty())
+		{
+			let stable_claims: BTreeMap<_, _> = profile
+				.required_string_claims
+				.iter()
+				.filter(|name| !matches!(name.as_str(), "iat" | "exp" | "nbf" | "jti"))
+				.map(|name| (name.as_str(), &claims[name]))
+				.collect();
+			let framed = serde_json::to_vec(&(
+				"agentgateway-mcp-verified-owner-v1",
+				provider,
+				stable_claims,
+			))
+			.expect("public JWT configuration serializes");
+			Some(crate::crypto::digest::sha256(&framed))
+		} else {
+			// Non-forwardable authentication never silently falls back to unowned MCP.
+			None
+		};
+		Self { owner, expires_at }
+	}
+
+	pub(crate) fn owner(&self) -> Option<[u8; 32]> {
+		self.owner
+	}
+	pub(crate) fn expires_at(&self) -> u64 {
+		self.expires_at
+	}
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Claims {
 	pub inner: Map<String, Value>,
@@ -896,8 +954,8 @@ impl Jwt {
 			);
 			return Ok(());
 		};
-		let claims = match self.validate_claims(&token) {
-			Ok(claims) => claims,
+		let (claims, mut identity) = match self.validate_claims_with_identity(&token) {
+			Ok(verified) => verified,
 			Err(e) if self.mode == Mode::Permissive => {
 				dtrace::pol_result!(
 					dtrace::Warn,
@@ -916,6 +974,18 @@ impl Jwt {
 			},
 		};
 
+		// An additional JWT policy must not replace protected origin claims with
+		// unowned or another actor's state. This also avoids shadowing CEL `jwt`
+		// while retaining a different verified session marker.
+		if let Some(previous) = req.extensions().get::<VerifiedMcpIdentity>() {
+			match identity.as_mut() {
+				Some(current) if previous.owner.is_some() && current.owner == previous.owner => {
+					current.expires_at = current.expires_at.min(previous.expires_at);
+				},
+				_ => return Err(TokenError::SessionIdentityReplacement),
+			}
+		}
+
 		if let Some(serde_json::Value::String(sub)) = claims.inner.get("sub")
 			&& let Some(log) = log
 		{
@@ -933,11 +1003,25 @@ impl Jwt {
 			Apply,
 			"authenticated request with JWT"
 		);
+		if let Some(identity) = identity {
+			req.extensions_mut().insert(identity);
+		} else {
+			req.extensions_mut().remove::<VerifiedMcpIdentity>();
+		}
 		req.extensions_mut().insert(claims);
 		Ok(())
 	}
 
 	pub fn validate_claims(&self, token: &str) -> Result<Claims, TokenError> {
+		self
+			.validate_claims_with_identity(token)
+			.map(|(claims, _)| claims)
+	}
+
+	fn validate_claims_with_identity(
+		&self,
+		token: &str,
+	) -> Result<(Claims, Option<VerifiedMcpIdentity>), TokenError> {
 		let header = decode_header(token).map_err(|error| {
 			debug!("Received token with invalid header.");
 
@@ -949,7 +1033,7 @@ impl Jwt {
 			TokenError::MissingKeyId
 		})?;
 
-		let decode_with = |key: &Jwk| {
+		let decode_with = |provider: &Provider, key: &Jwk| {
 			let decoded = decode::<Map<String, Value>>(token, &key.decoding, &key.validation)
 				.map_err(TokenError::Invalid)?;
 			key.profile.validate_token(
@@ -957,14 +1041,21 @@ impl Jwt {
 				&decoded.claims,
 				jsonwebtoken::get_current_timestamp(),
 			)?;
-			Ok(Claims {
-				inner: decoded.claims,
-				jwt: SecretString::new(if key.profile.non_forwardable_token {
-					String::new().into()
-				} else {
-					token.into()
-				}),
-			})
+			let verified_mcp_identity = key
+				.profile
+				.non_forwardable_token
+				.then(|| VerifiedMcpIdentity::from_verified(provider, key, &decoded.claims));
+			Ok((
+				Claims {
+					inner: decoded.claims,
+					jwt: SecretString::new(if key.profile.non_forwardable_token {
+						String::new().into()
+					} else {
+						token.into()
+					}),
+				},
+				verified_mcp_identity,
+			))
 		};
 
 		// A kid is only unique within one issuer's JWKS, so different issuers can share a kid (Entra tenants share keys; unrelated IdPs can collide)
@@ -982,7 +1073,7 @@ impl Jwt {
 			let Some(key) = provider.keys.get(kid) else {
 				continue;
 			};
-			match decode_with(key) {
+			match decode_with(provider, key) {
 				Ok(claims) => return Ok(claims),
 				Err(error) => {
 					debug!("Token is malformed or does not pass validation.");
@@ -997,16 +1088,16 @@ impl Jwt {
 		// No provider has both the token's iss and kid.
 		// Covers: unknown issuer, iss missing or not a string, and iss matches but kid doesn't.
 		// Falls back to the original, first provider that has the kid so that the same errors are produced.
-		let key = self
+		let (provider, key) = self
 			.providers
 			.iter()
-			.find_map(|provider| provider.keys.get(kid))
+			.find_map(|provider| provider.keys.get(kid).map(|key| (provider, key)))
 			.ok_or_else(|| {
 				debug!("Token refers to an unknown key.");
 
 				TokenError::UnknownKeyId(kid.to_owned())
 			})?;
 
-		decode_with(key)
+		decode_with(provider, key)
 	}
 }

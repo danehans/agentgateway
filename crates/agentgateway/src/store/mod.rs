@@ -48,6 +48,14 @@ impl SelfWorkload {
 	}
 }
 
+/// Opaque, process-local epochs. Never serialize configuration or secret bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConfigurationGeneration {
+	binds: [u8; 16],
+	discovery: [u8; 16],
+}
+
 #[derive(Clone, Debug)]
 pub struct Stores {
 	pub discovery: discovery::StoreUpdater,
@@ -61,6 +69,16 @@ impl Default for Stores {
 }
 
 impl Stores {
+	pub(crate) fn configuration_generation(&self) -> ConfigurationGeneration {
+		// Keep both locks until the snapshot has been constructed.
+		let binds = self.read_binds();
+		let discovery = self.read_discovery();
+		ConfigurationGeneration {
+			binds: *binds.generation().as_bytes(),
+			discovery: *discovery.generation().as_bytes(),
+		}
+	}
+
 	pub fn with_ipv6_enabled(ipv6_enabled: bool) -> Stores {
 		Self::new(ipv6_enabled, crate::ThreadingMode::Multithreaded)
 	}
