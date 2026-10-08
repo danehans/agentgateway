@@ -25,6 +25,9 @@ pub mod vertex;
 #[cfg(test)]
 mod golden_tests;
 
+#[cfg(test)]
+mod diagnostic_tests;
+
 pub trait Provider {
 	const NAME: Strng;
 }
@@ -520,16 +523,45 @@ pub use types::{
 	SimpleChatCompletionMessage, ToolCall,
 };
 
-pub fn logged_response_parsing(bytes: &[u8]) -> impl FnOnce(serde_json::Error) -> AIError + '_ {
-	|e| {
-		const LOGGED_BODY_LIMIT: usize = 1024;
-		let body = &bytes[..bytes.len().min(LOGGED_BODY_LIMIT)];
+/// Non-content diagnostics for JSON processing. Serde error messages may include
+/// input values, field names or custom serializer text, so never retain their
+/// Display, Debug or source in errors that reach logs or clients.
+#[derive(thiserror::Error, Debug, Clone, Copy)]
+#[error("{category} at line {line} column {column}")]
+pub struct JsonErrorDiagnostic {
+	category: &'static str,
+	line: usize,
+	column: usize,
+}
+
+impl From<serde_json::Error> for JsonErrorDiagnostic {
+	fn from(error: serde_json::Error) -> Self {
+		use serde_json::error::Category;
+		Self {
+			category: match error.classify() {
+				Category::Io => "io",
+				Category::Syntax => "syntax",
+				Category::Data => "data",
+				Category::Eof => "eof",
+			},
+			line: error.line(),
+			column: error.column(),
+		}
+	}
+}
+
+pub fn logged_response_parsing(bytes: &[u8]) -> impl FnOnce(serde_json::Error) -> AIError {
+	let response_bytes = bytes.len();
+	move |error| {
+		let diagnostic = JsonErrorDiagnostic::from(error);
 		warn!(
-			error = %e,
-			body = %String::from_utf8_lossy(body),
+			category = diagnostic.category,
+			line = diagnostic.line,
+			column = diagnostic.column,
+			response_bytes,
 			"failed to parse response"
 		);
-		AIError::ResponseParsing(e)
+		AIError::ResponseParsing(diagnostic)
 	}
 }
 
@@ -558,15 +590,15 @@ pub enum AIError {
 	#[error("prompt guard failed")]
 	PromptWebhookError,
 	#[error("failed to parse {0:?} request: {1}")]
-	RequestParsing(InputFormat, serde_json::Error),
+	RequestParsing(InputFormat, JsonErrorDiagnostic),
 	#[error("failed to marshal request: {0}")]
-	RequestMarshal(serde_json::Error),
+	RequestMarshal(JsonErrorDiagnostic),
 	#[error("failed to parse response: {0}")]
-	ResponseParsing(serde_json::Error),
+	ResponseParsing(JsonErrorDiagnostic),
 	#[error("invalid response: {0}")]
 	InvalidResponse(Strng),
 	#[error("failed to marshal response: {0}")]
-	ResponseMarshal(serde_json::Error),
+	ResponseMarshal(JsonErrorDiagnostic),
 	#[error("unsupported content encoding: {0}")]
 	UnsupportedEncoding(Strng),
 	#[error("failed to decode response: {0}")]
@@ -575,6 +607,24 @@ pub enum AIError {
 	Encoding(axum_core::Error),
 	#[error("error computing tokens")]
 	JoinError(#[from] tokio::task::JoinError),
+}
+
+impl AIError {
+	pub fn request_parsing(format: InputFormat, error: serde_json::Error) -> Self {
+		Self::RequestParsing(format, error.into())
+	}
+
+	pub fn request_marshal(error: serde_json::Error) -> Self {
+		Self::RequestMarshal(error.into())
+	}
+
+	pub fn response_parsing(error: serde_json::Error) -> Self {
+		Self::ResponseParsing(error.into())
+	}
+
+	pub fn response_marshal(error: serde_json::Error) -> Self {
+		Self::ResponseMarshal(error.into())
+	}
 }
 
 #[apply(schema!)]

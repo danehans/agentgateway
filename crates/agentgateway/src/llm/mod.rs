@@ -402,12 +402,12 @@ fn render_openai_completions(
 	let body = match req {
 		types::ChatRequest::Completions(mut req) => {
 			apply_openai_moderation(&mut req.moderation, ctx)?;
-			serde_json::to_vec(&req).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&req).map_err(AIError::request_marshal)
 		},
 		types::ChatRequest::Messages(req) => {
 			let mut translated = conversion::completions::from_messages::translate_request(&req)?;
 			apply_openai_moderation(&mut translated.moderation, ctx)?;
-			serde_json::to_vec(&translated).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&translated).map_err(AIError::request_marshal)
 		},
 		types::ChatRequest::Responses(req) => {
 			let translated = conversion::openai_compat::from_responses::translate_request(&req)?;
@@ -419,7 +419,7 @@ fn render_openai_completions(
 				});
 			}
 			apply_openai_moderation(&mut request.moderation, ctx)?;
-			serde_json::to_vec(&request).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&request).map_err(AIError::request_marshal)
 		},
 		// Missing: Gemini --> Completions (cross-provider translation is out of scope)
 		types::ChatRequest::Gemini(_) => Err(AIError::UnsupportedConversion(strng::literal!(
@@ -439,12 +439,12 @@ fn render_openai_responses(
 	match req {
 		types::ChatRequest::Responses(mut req) => {
 			apply_openai_moderation(&mut req.moderation, ctx)?;
-			serde_json::to_vec(&req).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&req).map_err(AIError::request_marshal)
 		},
 		types::ChatRequest::Messages(req) => {
 			let mut translated = conversion::responses::from_messages::translate_request(&req)?;
 			apply_openai_moderation(&mut translated.moderation, ctx)?;
-			serde_json::to_vec(&translated).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&translated).map_err(AIError::request_marshal)
 		},
 		_ => Err(AIError::UnsupportedConversion(strng::literal!(
 			"expected responses request"
@@ -462,7 +462,7 @@ fn apply_openai_moderation(
 	}) else {
 		return Ok(());
 	};
-	*request_moderation = Some(serde_json::to_value(moderation).map_err(AIError::RequestMarshal)?);
+	*request_moderation = Some(serde_json::to_value(moderation).map_err(AIError::request_marshal)?);
 	Ok(())
 }
 
@@ -474,7 +474,7 @@ fn render_anthropic_messages(
 		types::ChatRequest::Completions(req) => {
 			conversion::messages::from_completions::translate(&req, catalog)
 		},
-		types::ChatRequest::Messages(req) => serde_json::to_vec(&req).map_err(AIError::RequestMarshal),
+		types::ChatRequest::Messages(req) => serde_json::to_vec(&req).map_err(AIError::request_marshal),
 		types::ChatRequest::Responses(_) => Err(AIError::UnsupportedConversion(strng::literal!(
 			"responses to messages"
 		))),
@@ -491,7 +491,7 @@ fn render_vertex_gemini(
 	match req {
 		// Native Gemini inbound is a passthrough, so unlike the completions conversion it does
 		// not depend on Vertex specifics; the Gemini API provider renders through here too.
-		types::ChatRequest::Gemini(req) => serde_json::to_vec(&req).map_err(AIError::RequestMarshal),
+		types::ChatRequest::Gemini(req) => serde_json::to_vec(&req).map_err(AIError::request_marshal),
 		types::ChatRequest::Completions(req) => {
 			let is_vertex = matches!(ctx.provider, AIProvider::Vertex(_));
 			conversion::vertex_gemini::from_completions::translate(&req, is_vertex)
@@ -1951,7 +1951,7 @@ impl AIProvider {
 			let body = serde_json::to_vec(&types::count_tokens::Response {
 				input_tokens: count,
 			})
-			.map_err(AIError::ResponseMarshal)?;
+			.map_err(AIError::response_marshal)?;
 			let resp = ::http::Response::builder()
 				.status(::http::StatusCode::OK)
 				.header(::http::header::CONTENT_TYPE, "application/json")
@@ -2043,7 +2043,7 @@ impl AIProvider {
 				p.unmarshal_request(&bytes, log)
 			} else {
 				serde_json::from_slice(bytes.as_ref())
-					.map_err(|err| AIError::RequestParsing(InputFormat::Detect, err))
+					.map_err(|err| AIError::request_parsing(InputFormat::Detect, err))
 			}
 			.unwrap_or_else(|_| types::detect::Request::new_raw(bytes))
 		} else {
@@ -2063,7 +2063,7 @@ impl AIProvider {
 				|_, req, _, _| match req {
 					types::detect::Request::Raw(bytes) => Ok(bytes.to_vec()),
 					types::detect::Request::Json(value) => {
-						serde_json::to_vec(value).map_err(AIError::RequestMarshal)
+						serde_json::to_vec(value).map_err(AIError::request_marshal)
 					},
 				},
 			)
@@ -2079,7 +2079,7 @@ impl AIProvider {
 	) -> Result<Vec<u8>, AIError> {
 		match self {
 			AIProvider::Anthropic(_) | AIProvider::Custom(_) => {
-				serde_json::to_vec(req).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(req).map_err(AIError::request_marshal)
 			},
 			// Mantle serves Anthropic's native count_tokens (passthrough); Runtime uses the Bedrock
 			// CountTokens API. This must match the endpoint `get_path_for_route` resolves for the path.
@@ -2089,20 +2089,20 @@ impl AIProvider {
 					bedrock::BedrockEndpoint::Mantle
 				) =>
 			{
-				serde_json::to_vec(req).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(req).map_err(AIError::request_marshal)
 			},
 			AIProvider::Bedrock(_) => {
 				conversion::bedrock::from_anthropic_token_count::translate(req, headers)
 			},
 			AIProvider::Vertex(provider) => {
-				let body = serde_json::to_vec(req).map_err(AIError::RequestMarshal)?;
+				let body = serde_json::to_vec(req).map_err(AIError::request_marshal)?;
 				provider.prepare_anthropic_count_tokens_body(body)
 			},
 			AIProvider::Azure(p)
 				if matches!(p.resource_type, azure::AzureResourceType::Foundry)
 					&& p.is_anthropic_model(request_model) =>
 			{
-				serde_json::to_vec(req).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(req).map_err(AIError::request_marshal)
 			},
 			_ => Err(AIError::UnsupportedConversion(strng::literal!(
 				"count_tokens not supported for this provider"
@@ -2118,12 +2118,12 @@ impl AIProvider {
 		request_model: &str,
 	) -> Result<Vec<u8>, AIError> {
 		match self {
-			AIProvider::Gemini(_) => serde_json::to_vec(req).map_err(AIError::RequestMarshal),
+			AIProvider::Gemini(_) => serde_json::to_vec(req).map_err(AIError::request_marshal),
 			AIProvider::Vertex(p) if p.is_gemini_model(request_model) => {
-				serde_json::to_vec(req).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(req).map_err(AIError::request_marshal)
 			},
 			AIProvider::Custom(p) if p.supports(custom::ProviderFormat::GeminiCountTokens) => {
-				serde_json::to_vec(req).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(req).map_err(AIError::request_marshal)
 			},
 			_ => Err(AIError::UnsupportedConversion(strng::format!(
 				"from GeminiCountTokens to provider {}",
@@ -2142,7 +2142,7 @@ impl AIProvider {
 			| AIProvider::Copilot(_)
 			| AIProvider::Azure(_)
 			| AIProvider::Gemini(_)
-			| AIProvider::Anthropic(_) => serde_json::to_vec(req).map_err(AIError::RequestMarshal),
+			| AIProvider::Anthropic(_) => serde_json::to_vec(req).map_err(AIError::request_marshal),
 			AIProvider::Vertex(p) => conversion::vertex::from_embeddings::translate(req, p),
 			AIProvider::Bedrock(_) => conversion::bedrock::from_embeddings::translate(req),
 		}
@@ -2155,7 +2155,7 @@ impl AIProvider {
 			| AIProvider::Copilot(_)
 			| AIProvider::Azure(_)
 			| AIProvider::Gemini(_)
-			| AIProvider::Anthropic(_) => serde_json::to_vec(req).map_err(AIError::RequestMarshal),
+			| AIProvider::Anthropic(_) => serde_json::to_vec(req).map_err(AIError::request_marshal),
 			AIProvider::Vertex(p) => conversion::vertex::from_rerank::translate(req, p),
 			AIProvider::Bedrock(p) => conversion::bedrock::from_rerank::translate(req, p),
 		}
@@ -2534,7 +2534,7 @@ impl AIProvider {
 			}
 
 			let llm_resp = resp.to_llm_response(log_content);
-			let body = resp.serialize().map_err(AIError::ResponseParsing)?;
+			let body = resp.serialize().map_err(AIError::response_parsing)?;
 			(llm_resp, Bytes::copy_from_slice(&body))
 		};
 
@@ -2867,7 +2867,7 @@ impl AIProvider {
 					&req.request_model,
 				)?;
 				let llm_resp = translated.to_llm_response(LogContentFields::default());
-				let body = translated.serialize().map_err(AIError::ResponseParsing)?;
+				let body = translated.serialize().map_err(AIError::response_parsing)?;
 				Ok((llm_resp, Bytes::from(body)))
 			},
 			AIProvider::Copilot(_) => {
@@ -2879,7 +2879,7 @@ impl AIProvider {
 				resp
 					.entry("model".to_string())
 					.or_insert_with(|| serde_json::Value::String(req.request_model.to_string()));
-				let normalized = serde_json::to_vec(&resp).map_err(AIError::ResponseParsing)?;
+				let normalized = serde_json::to_vec(&resp).map_err(AIError::response_parsing)?;
 				let resp: types::embeddings::Response =
 					serde_json::from_slice(&normalized).map_err(logged_response_parsing(&normalized))?;
 				let llm_resp = resp.to_llm_response(LogContentFields::default());
@@ -2889,7 +2889,7 @@ impl AIProvider {
 				let translated =
 					conversion::vertex::from_embeddings::translate_response(&bytes, p, &req.request_model)?;
 				let llm_resp = translated.to_llm_response(LogContentFields::default());
-				let body = translated.serialize().map_err(AIError::ResponseParsing)?;
+				let body = translated.serialize().map_err(AIError::response_parsing)?;
 				Ok((llm_resp, Bytes::from(body)))
 			},
 			_ => {
@@ -2905,13 +2905,13 @@ impl AIProvider {
 			AIProvider::Bedrock(_) => {
 				let translated = conversion::bedrock::from_rerank::translate_response(&bytes)?;
 				let llm_resp = translated.to_llm_response(LogContentFields::default());
-				let body = translated.serialize().map_err(AIError::ResponseParsing)?;
+				let body = translated.serialize().map_err(AIError::response_parsing)?;
 				Ok((llm_resp, Bytes::from(body)))
 			},
 			AIProvider::Vertex(_) => {
 				let translated = conversion::vertex::from_rerank::translate_response(&bytes)?;
 				let llm_resp = translated.to_llm_response(LogContentFields::default());
-				let body = translated.serialize().map_err(AIError::ResponseParsing)?;
+				let body = translated.serialize().map_err(AIError::response_parsing)?;
 				Ok((llm_resp, Bytes::from(body)))
 			},
 			_ => {
@@ -3170,7 +3170,7 @@ impl AIProvider {
 				Some(json::ParsedJson(value)) => serde_json::from_value(value),
 				None => serde_json::from_slice(&bytes),
 			}
-			.map_err(|err| AIError::RequestParsing(T::input_format(), err))?;
+			.map_err(|err| AIError::request_parsing(T::input_format(), err))?;
 			let model = req.model();
 			if model.as_deref().is_none() {
 				return Err(AIError::MissingField("model not specified".into()));
@@ -3181,7 +3181,7 @@ impl AIProvider {
 		let mut request = match cached {
 			Some(json::ParsedJson(value)) => value,
 			None => serde_json::from_slice(&bytes)
-				.map_err(|err| AIError::RequestParsing(T::input_format(), err))?,
+				.map_err(|err| AIError::request_parsing(T::input_format(), err))?,
 		};
 		self.set_provider_request_model(&parts, &mut request, path_model_wins)?;
 		let mut request = if let Some(p) = policies {
@@ -3191,7 +3191,7 @@ impl AIProvider {
 		};
 		self.finalize_request_model(&mut request)?;
 		let req: T = serde_json::from_value(request)
-			.map_err(|err| AIError::RequestParsing(T::input_format(), err))?;
+			.map_err(|err| AIError::request_parsing(T::input_format(), err))?;
 
 		Ok((parts, managed_body, req))
 	}

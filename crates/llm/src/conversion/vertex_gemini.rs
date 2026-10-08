@@ -151,7 +151,7 @@ pub mod from_completions {
 	}
 	pub fn translate(req: &types::completions::Request, is_vertex: bool) -> Result<Vec<u8>, AIError> {
 		let out = build_request(req, is_vertex)?;
-		serde_json::to_vec(&out).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&out).map_err(AIError::request_marshal)
 	}
 
 	pub(super) fn build_request(
@@ -199,7 +199,7 @@ pub mod from_completions {
 			.or_else(|| req.rest.get("safety_settings"))
 		{
 			Some(v) => Vec::<vg::SafetySetting>::deserialize(v).unwrap_or_else(|e| {
-				tracing::warn!(error = %e, "ignoring malformed safetySettings");
+				tracing::warn!(error = %crate::JsonErrorDiagnostic::from(e), "ignoring malformed safetySettings");
 				Vec::new()
 			}),
 			None => Vec::new(),
@@ -1140,8 +1140,8 @@ pub mod to_completions {
 		let resp: vg::GenerateContentResponse =
 			serde_json::from_slice(bytes).map_err(logged_response_parsing(bytes))?;
 		let typed = build_response(&resp);
-		let inner =
-			json::convert::<_, types::completions::Response>(&typed).map_err(AIError::ResponseParsing)?;
+		let inner = json::convert::<_, types::completions::Response>(&typed)
+			.map_err(AIError::response_parsing)?;
 		Ok(Box::new(inner))
 	}
 
@@ -1513,7 +1513,7 @@ pub mod to_completions {
 			let chunk = match ev {
 				parse::sse::SseJsonEvent::Data(Ok(c)) => c,
 				parse::sse::SseJsonEvent::Data(Err(e)) => {
-					tracing::debug!("failed to parse gemini stream chunk: {e}");
+					tracing::debug!(error = %e, "failed to parse gemini stream chunk");
 					return vec![];
 				},
 				parse::sse::SseJsonEvent::Done

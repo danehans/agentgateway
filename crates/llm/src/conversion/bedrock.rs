@@ -301,7 +301,7 @@ fn invalid_request_error(bytes: &[u8]) -> Result<bytes::Bytes, AIError> {
 		},
 	};
 	Ok(bytes::Bytes::from(
-		serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+		serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 	))
 }
 
@@ -379,7 +379,7 @@ pub mod from_rerank {
 				},
 			},
 		};
-		serde_json::to_vec(&bedrock_req).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&bedrock_req).map_err(AIError::request_marshal)
 	}
 
 	/// Bedrock returns only `index` + `relevanceScore`; it does not echo document text.
@@ -415,7 +415,7 @@ pub mod from_embeddings {
 
 	pub fn translate(req: &types::embeddings::Request) -> Result<Vec<u8>, AIError> {
 		let typed = json::convert::<_, types::embeddings::typed::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Embeddings, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Embeddings, err))?;
 
 		let model = typed.model.as_str();
 
@@ -426,7 +426,7 @@ pub mod from_embeddings {
 			let input = match &typed.input {
 				types::embeddings::typed::EmbeddingInput::String(s) => s.to_string(),
 				types::embeddings::typed::EmbeddingInput::Array(_) => {
-					return Err(AIError::RequestParsing(
+					return Err(AIError::request_parsing(
 						crate::InputFormat::Embeddings,
 						serde::de::Error::custom("Nova requires a single string input"),
 					));
@@ -455,7 +455,7 @@ pub mod from_embeddings {
 					},
 				},
 			};
-			serde_json::to_vec(&bedrock_req).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&bedrock_req).map_err(AIError::request_marshal)
 		} else if model.contains("cohere") {
 			let input = typed.input.as_strings();
 
@@ -480,13 +480,13 @@ pub mod from_embeddings {
 					None
 				},
 			};
-			serde_json::to_vec(&bedrock_req).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&bedrock_req).map_err(AIError::request_marshal)
 		} else {
 			// Titan only accepts a single string; array input is rejected.
 			let input = match &typed.input {
 				types::embeddings::typed::EmbeddingInput::String(s) => s.to_string(),
 				types::embeddings::typed::EmbeddingInput::Array(_) => {
-					return Err(AIError::RequestParsing(
+					return Err(AIError::request_parsing(
 						crate::InputFormat::Embeddings,
 						serde::de::Error::custom("Titan requires a single string input"),
 					));
@@ -506,7 +506,7 @@ pub mod from_embeddings {
 					},
 				}),
 			};
-			serde_json::to_vec(&bedrock_req).map_err(AIError::RequestMarshal)
+			serde_json::to_vec(&bedrock_req).map_err(AIError::request_marshal)
 		}
 	}
 
@@ -547,7 +547,7 @@ pub mod from_embeddings {
 			};
 			// Convert the normalized internal typed response back to the passthrough-preserving OpenAI format
 			let openai_resp = json::convert::<_, types::embeddings::Response>(&typed_resp)
-				.map_err(AIError::ResponseParsing)?;
+				.map_err(AIError::response_parsing)?;
 			Ok(Box::new(openai_resp))
 		} else if model.contains("cohere") {
 			let resp: types::bedrock::CohereEmbeddingResponse =
@@ -558,14 +558,16 @@ pub mod from_embeddings {
 					let Some(float_embeddings) = embeddings.remove("float") else {
 						let mut received_types = embeddings.keys().map(String::as_str).collect::<Vec<_>>();
 						received_types.sort_unstable();
-						return Err(AIError::ResponseParsing(serde::de::Error::custom(format!(
-							"Cohere response did not include float embeddings; received types: {}",
-							if received_types.is_empty() {
-								"none".to_string()
-							} else {
-								received_types.join(", ")
-							}
-						))));
+						return Err(AIError::response_parsing(serde::de::Error::custom(
+							format!(
+								"Cohere response did not include float embeddings; received types: {}",
+								if received_types.is_empty() {
+									"none".to_string()
+								} else {
+									received_types.join(", ")
+								}
+							),
+						)));
 					};
 					float_embeddings
 				},
@@ -598,7 +600,7 @@ pub mod from_embeddings {
 			};
 			// Convert the normalized internal typed response back to the passthrough-preserving OpenAI format
 			let openai_resp = json::convert::<_, types::embeddings::Response>(&typed_resp)
-				.map_err(AIError::ResponseParsing)?;
+				.map_err(AIError::response_parsing)?;
 			Ok(Box::new(openai_resp))
 		} else {
 			let mut resp: types::bedrock::AmazonTitanV2EmbeddingResponse =
@@ -630,7 +632,7 @@ pub mod from_embeddings {
 			};
 			// Convert the normalized internal typed response back to the passthrough-preserving OpenAI format
 			let openai_resp = json::convert::<_, types::embeddings::Response>(&typed_resp)
-				.map_err(AIError::ResponseParsing)?;
+				.map_err(AIError::response_parsing)?;
 			Ok(Box::new(openai_resp))
 		}
 	}
@@ -831,11 +833,11 @@ pub mod from_completions {
 		catalog: crate::model_catalog::Catalog<'_>,
 	) -> Result<super::BedrockRequest, AIError> {
 		let typed = json::convert::<_, completions::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Completions, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Completions, err))?;
 		let model_id = typed.model.clone().unwrap_or_default();
 		let (xlated, tool_name_map) =
 			translate_internal(typed, model_id, provider, headers, prompt_caching, catalog)?;
-		let body = serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)?;
+		let body = serde_json::to_vec(&xlated).map_err(AIError::request_marshal)?;
 		Ok(super::BedrockRequest {
 			body,
 			tool_name_map,
@@ -1194,7 +1196,7 @@ pub mod from_completions {
 		let provider_usage = resp.usage.map(super::super::ProviderUsage::from);
 		let openai = translate_response_internal(resp, model, tool_name_map)?;
 		let passthrough = json::convert::<_, types::completions::Response>(&openai)
-			.map_err(AIError::ResponseParsing)?;
+			.map_err(AIError::response_parsing)?;
 		Ok(Box::new(super::super::ResponseWithProviderUsage {
 			response: passthrough,
 			provider_usage,
@@ -1223,7 +1225,7 @@ pub mod from_completions {
 			},
 		};
 		Ok(Bytes::from(
-			serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+			serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 		))
 	}
 
@@ -1340,12 +1342,12 @@ pub mod from_completions {
 								// here would be a protocol change, not normal multi-chunk accumulation.
 								dr.reasoning_signature = Some(sig);
 							},
-							bedrock::ContentBlockDelta::ReasoningContent(other) => {
+							bedrock::ContentBlockDelta::ReasoningContent(_) => {
 								// `ReasoningContentBlockDelta` is `#[non_exhaustive]`; this arm catches
 								// the `Unknown` variant and any future protocol additions that we have
 								// not yet wired up explicitly. Log so a silently-introduced delta type
 								// shows up in dev rather than being invisibly dropped.
-								tracing::debug!(?other, "unhandled Bedrock reasoning content delta variant",);
+								tracing::debug!("unhandled Bedrock reasoning content delta variant");
 							},
 							bedrock::ContentBlockDelta::Text(t) => {
 								if let Some(completion) = completion.as_mut() {
@@ -1523,9 +1525,9 @@ pub mod from_messages {
 		catalog: crate::model_catalog::Catalog<'_>,
 	) -> Result<super::BedrockRequest, AIError> {
 		let typed = json::convert::<_, messages::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Messages, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Messages, err))?;
 		let (xlated, tool_name_map) = translate_internal(typed, provider, headers, catalog)?;
-		let body = serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)?;
+		let body = serde_json::to_vec(&xlated).map_err(AIError::request_marshal)?;
 		Ok(super::BedrockRequest {
 			body,
 			tool_name_map,
@@ -1609,7 +1611,7 @@ pub mod from_messages {
 					// Bedrock's Converse API has no native equivalent of an Anthropic server tool
 					// (e.g. web_search_20250305) executing upstream of the model. Drop it rather
 					// than fail the whole request; the model just won't see this tool offered.
-					tracing::debug!("Unsupported server tool in Bedrock conversion: {:?}", tool);
+					tracing::debug!("Unsupported server tool in Bedrock conversion");
 					continue;
 				};
 				bedrock_tools.push((
@@ -2013,7 +2015,7 @@ pub mod from_messages {
 		let provider_usage = resp.usage.map(super::super::ProviderUsage::from);
 		let openai = translate_response_internal(resp, model, tool_name_map)?;
 		let passthrough =
-			json::convert::<_, types::messages::Response>(&openai).map_err(AIError::ResponseParsing)?;
+			json::convert::<_, types::messages::Response>(&openai).map_err(AIError::response_parsing)?;
 		Ok(Box::new(super::super::ResponseWithProviderUsage {
 			response: passthrough,
 			provider_usage,
@@ -2039,7 +2041,7 @@ pub mod from_messages {
 			},
 		};
 		Ok(Bytes::from(
-			serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+			serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 		))
 	}
 
@@ -2064,8 +2066,8 @@ pub mod from_messages {
 		parse::aws_sse::transform_multi(b, buffer_limit, move |aws_event| {
 			let event = match bedrock::ConverseStreamOutput::deserialize(aws_event) {
 				Ok(e) => e,
-				Err(e) => {
-					tracing::error!(error = %e, "failed to deserialize bedrock stream event");
+				Err(_) => {
+					tracing::error!("failed to deserialize bedrock stream event");
 					return vec![(
 						"error",
 						serde_json::json!({
@@ -2440,7 +2442,7 @@ pub mod from_responses {
 		catalog: crate::model_catalog::Catalog<'_>,
 	) -> Result<super::BedrockRequest, AIError> {
 		let mut typed = json::convert::<_, responses::CreateResponse>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Responses, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Responses, err))?;
 		let namespaces =
 			crate::conversion::namespace_tools::NamespaceToolMap::rewrite_request(&mut typed)?;
 		let explicit_thinking_budget = extract_responses_thinking_budget_tokens(req);
@@ -2454,7 +2456,7 @@ pub mod from_responses {
 			prompt_caching,
 			catalog,
 		)?;
-		let body = serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)?;
+		let body = serde_json::to_vec(&xlated).map_err(AIError::request_marshal)?;
 		Ok(super::BedrockRequest {
 			body,
 			tool_name_map,
@@ -2518,7 +2520,7 @@ pub mod from_responses {
 							)),
 						})),
 						_ => {
-							tracing::warn!("Unsupported tool type in Responses API: {:?}", tool_def);
+							tracing::warn!("Unsupported tool type in Responses API");
 							None
 						},
 					}
@@ -2546,7 +2548,7 @@ pub mod from_responses {
 					| ToolChoiceParam::ProgrammaticToolCalling
 					| ToolChoiceParam::ApplyPatch
 					| ToolChoiceParam::Shell => {
-						tracing::warn!("Unsupported tool choice for Bedrock: {:?}", tc);
+						tracing::warn!("Unsupported tool choice for Bedrock");
 						None
 					},
 				}
@@ -2563,10 +2565,6 @@ pub mod from_responses {
 		// Convert input to Bedrock messages and system content
 		let mut messages: Vec<bedrock::Message> = Vec::new();
 		let mut system_blocks: Vec<bedrock::SystemContentBlock> = Vec::new();
-
-		if let Ok(json) = serde_json::to_string_pretty(&req.input) {
-			tracing::debug!("Converting Responses input to Bedrock: {}", json);
-		}
 
 		// Convert Input format to items
 		let items = match &req.input {
@@ -2593,7 +2591,7 @@ pub mod from_responses {
 			for part in parts {
 				match part {
 					InputContent::InputText(input_text) => {
-						tracing::debug!("Found InputText with text: {}", input_text.text);
+						tracing::debug!(text_bytes = input_text.text.len(), "Found InputText");
 						blocks.push(bedrock::ContentBlock::Text(input_text.text.clone()));
 						maybe_insert_cache_point(
 							&mut blocks,
@@ -2826,9 +2824,8 @@ pub mod from_responses {
 				InputItem::Item(Item::FunctionCall(call)) => {
 					let Ok(input) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
 						tracing::warn!(
-							"Skipping function_call with invalid JSON arguments for tool '{}': {}",
-							call.name,
-							call.arguments
+							arguments_bytes = call.arguments.len(),
+							"Skipping function_call with invalid JSON arguments"
 						);
 						continue;
 					};
@@ -3069,7 +3066,7 @@ pub mod from_responses {
 		ensure_tool_config_for_history(&mut bedrock_request);
 
 		tracing::debug!(
-			"Bedrock request - messages: {}, system blocks: {}, tools: {}, tool_choice: {:?}",
+			"Bedrock request - messages: {}, system blocks: {}, tools: {}, has tool choice: {}",
 			bedrock_request.messages.len(),
 			bedrock_request
 				.system
@@ -3084,7 +3081,7 @@ pub mod from_responses {
 			bedrock_request
 				.tool_config
 				.as_ref()
-				.and_then(|tc| tc.tool_choice.as_ref())
+				.is_some_and(|tc| tc.tool_choice.is_some())
 		);
 
 		Ok((bedrock_request, tool_name_map))
@@ -3150,7 +3147,7 @@ pub mod from_responses {
 			namespaces.restore_response(&mut typed);
 		}
 		let passthrough =
-			json::convert::<_, types::responses::Response>(&typed).map_err(AIError::ResponseParsing)?;
+			json::convert::<_, types::responses::Response>(&typed).map_err(AIError::response_parsing)?;
 		Ok(Box::new(super::super::ResponseWithProviderUsage {
 			response: passthrough,
 			provider_usage,
@@ -3170,7 +3167,7 @@ pub mod from_responses {
 			},
 		};
 		Ok(Bytes::from(
-			serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+			serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 		))
 	}
 
@@ -3222,15 +3219,15 @@ pub mod from_responses {
 		};
 
 		parse::aws_sse::transform_multi(b, buffer_limit, move |aws_event| {
-			tracing::debug!("Raw AWS event - headers: {:?}", aws_event.headers());
-			if let Ok(body_str) = std::str::from_utf8(aws_event.payload()) {
-				tracing::debug!("AWS event body: {}", body_str);
-			}
+			tracing::debug!(
+				payload_bytes = aws_event.payload().len(),
+				"AWS stream event"
+			);
 
 			let event = match bedrock::ConverseStreamOutput::deserialize(aws_event) {
 				Ok(e) => e,
-				Err(e) => {
-					tracing::error!(error = %e, "failed to deserialize bedrock stream event");
+				Err(_) => {
+					tracing::error!("failed to deserialize bedrock stream event");
 					sequence_number += 1;
 					return vec![(
 						"error",
@@ -3621,9 +3618,9 @@ pub mod from_anthropic_token_count {
 			.and_then(|v| v.to_str().ok())
 			.unwrap_or("2023-06-01");
 
-		let body = serde_json::to_vec(req).map_err(AIError::RequestMarshal)?;
+		let body = serde_json::to_vec(req).map_err(AIError::request_marshal)?;
 		let mut body: serde_json::Map<String, serde_json::Value> =
-			serde_json::from_slice(&body).map_err(AIError::RequestMarshal)?;
+			serde_json::from_slice(&body).map_err(AIError::request_marshal)?;
 
 		// Remove the model field because its in the URL path not the body
 		body.remove("model");
@@ -3638,7 +3635,7 @@ pub mod from_anthropic_token_count {
 			.entry("anthropic_version")
 			.or_insert(serde_json::Value::String(anthropic_version.into()));
 
-		let body_json = serde_json::to_vec(&body).map_err(AIError::RequestMarshal)?;
+		let body_json = serde_json::to_vec(&body).map_err(AIError::request_marshal)?;
 		let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_json);
 
 		let xlated = types::bedrock::CountTokensRequest {
@@ -3646,7 +3643,7 @@ pub mod from_anthropic_token_count {
 				invoke_model: types::bedrock::InvokeModelBody { body: body_b64 },
 			},
 		};
-		serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&xlated).map_err(AIError::request_marshal)
 	}
 }
 
@@ -3957,10 +3954,11 @@ impl ConverseResponseAdapter {
 			performance_config: _,
 		} = resp;
 
-		if let Some(trace) = trace.as_ref()
-			&& let Some(guardrail_trace) = &trace.guardrail
+		if trace
+			.as_ref()
+			.is_some_and(|trace| trace.guardrail.is_some())
 		{
-			trace!("Bedrock guardrail trace: {:?}", guardrail_trace);
+			trace!("Bedrock guardrail trace present");
 		}
 
 		let message = match output {

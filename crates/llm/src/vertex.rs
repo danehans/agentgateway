@@ -66,14 +66,14 @@ fn prepare_anthropic_body(
 	apply: impl FnOnce(&mut Map<String, Value>),
 ) -> Result<Vec<u8>, AIError> {
 	let mut body: Map<String, Value> =
-		serde_json::from_slice(&body).map_err(AIError::RequestMarshal)?;
+		serde_json::from_slice(&body).map_err(AIError::request_marshal)?;
 	body.insert(
 		"anthropic_version".to_string(),
 		Value::String(ANTHROPIC_VERSION.to_string()),
 	);
 	apply(&mut body);
 	remove_unsupported_vertex_fields(&mut body);
-	serde_json::to_vec(&body).map_err(AIError::RequestMarshal)
+	serde_json::to_vec(&body).map_err(AIError::request_marshal)
 }
 
 impl Provider {

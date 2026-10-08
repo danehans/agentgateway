@@ -34,7 +34,7 @@ pub mod from_rerank {
 			// Cohere `return_documents` -> Vertex inverse `ignoreRecordDetailsInResponse`.
 			ignore_record_details_in_response: !req.return_documents.unwrap_or(false),
 		};
-		serde_json::to_vec(&vertex_req).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&vertex_req).map_err(AIError::request_marshal)
 	}
 
 	/// Discovery Engine returns synthetic ids + scores in rank order; it does not echo document text.
@@ -48,7 +48,7 @@ pub mod from_rerank {
 				// Invert the synthetic id back to the original document index; a wrong mapping here
 				// attaches scores to the wrong documents.
 				let index = r.id.parse::<u32>().map_err(|_| {
-					AIError::ResponseParsing(serde::de::Error::custom(format!(
+					AIError::response_parsing(serde::de::Error::custom(format!(
 						"vertex rerank returned non-numeric record id: {}",
 						r.id
 					)))
@@ -117,7 +117,7 @@ pub mod from_embeddings {
 		provider: &crate::vertex::Provider,
 	) -> Result<Vec<u8>, AIError> {
 		let typed = json::convert::<_, types::embeddings::typed::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Embeddings, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Embeddings, err))?;
 		let params = Params::extract(req, &typed);
 
 		if provider.uses_embed_content(&typed.model) {
@@ -165,7 +165,7 @@ pub mod from_embeddings {
 			instances,
 			parameters,
 		};
-		serde_json::to_vec(&vertex_req).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&vertex_req).map_err(AIError::request_marshal)
 	}
 
 	fn translate_embed_content_request(
@@ -176,7 +176,7 @@ pub mod from_embeddings {
 		// variant, and extra parts would silently collapse into a single vector.
 		let mut inputs = typed.input.as_strings();
 		if inputs.len() != 1 {
-			return Err(AIError::RequestParsing(
+			return Err(AIError::request_parsing(
 				crate::InputFormat::Embeddings,
 				serde::de::Error::custom(
 					"Vertex embedContent does not support batching; `input` must contain exactly one string",
@@ -219,7 +219,7 @@ pub mod from_embeddings {
 			},
 			embed_content_config,
 		};
-		serde_json::to_vec(&vertex_req).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&vertex_req).map_err(AIError::request_marshal)
 	}
 
 	pub fn translate_response(
@@ -244,7 +244,7 @@ pub mod from_embeddings {
 		};
 		// Convert the normalized internal typed response back to the passthrough-preserving OpenAI format
 		let openai_resp = json::convert::<_, types::embeddings::Response>(&typed_resp)
-			.map_err(AIError::ResponseParsing)?;
+			.map_err(AIError::response_parsing)?;
 		Ok(Box::new(openai_resp))
 	}
 

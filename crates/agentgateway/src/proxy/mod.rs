@@ -768,6 +768,45 @@ pub fn resolve_simple_backend_with_policies(
 mod tests {
 	use super::*;
 
+	#[tokio::test]
+	async fn ai_json_errors_withhold_values_from_http_and_grpc_clients() {
+		let secret = "openshield-private-proxy-error-sentinel";
+		for request in [true, false] {
+			for grpc in [true, false] {
+				let raw: serde_json::Error = serde::de::Error::custom(secret);
+				let error = if request {
+					ProxyError::AIRequest(llm::AIError::request_parsing(
+						llm::InputFormat::Messages,
+						raw,
+					))
+				} else {
+					ProxyError::AIResponse(llm::AIError::response_parsing(raw))
+				};
+				assert!(!error.to_string().contains(secret));
+				assert!(!format!("{error:?}").contains(secret));
+				let response = error.into_response_with_grpc(grpc);
+				assert_eq!(
+					response.status(),
+					if grpc {
+						StatusCode::OK
+					} else if request {
+						StatusCode::BAD_REQUEST
+					} else {
+						StatusCode::BAD_GATEWAY
+					}
+				);
+				for value in response.headers().values() {
+					assert!(!String::from_utf8_lossy(value.as_bytes()).contains(secret));
+				}
+				let body = http_body_util::BodyExt::collect(response.into_body())
+					.await
+					.unwrap()
+					.to_bytes();
+				assert!(!String::from_utf8_lossy(&body).contains(secret));
+			}
+		}
+	}
+
 	#[test]
 	fn substrate_ingress_reason_preserves_client_facing_statuses() {
 		for (status, reason) in [

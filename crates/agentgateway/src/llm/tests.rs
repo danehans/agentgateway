@@ -2337,7 +2337,7 @@ fn copilot_embeddings_response_preserves_explicit_openai_fields() {
 }
 
 #[test]
-fn copilot_embeddings_parse_error_logs_normalized_response() {
+fn copilot_embeddings_parse_errors_log_metadata_without_content() {
 	#[derive(Clone)]
 	struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -2360,28 +2360,33 @@ fn copilot_embeddings_parse_error_logs_normalized_response() {
 		.with_writer(move || writer.clone())
 		.finish();
 
+	const SECRET: &str = "openshield-private-copilot-sentinel";
 	tracing::subscriber::with_default(subscriber, || {
 		let provider = AIProvider::Copilot(copilot::Provider {
 			model_override: None,
 		});
 		let mut request = llm_request_with_tokens(None);
 		request.input_format = InputFormat::Embeddings;
-		request.request_model = "text-embedding-3-small".into();
-		let response = Bytes::from_static(br#"{"usage":"invalid"}"#);
+		request.request_model = SECRET.into();
+		let response = Bytes::from(serde_json::to_vec(&json!({"usage": SECRET})).unwrap());
 
-		assert!(
-			provider
-				.process_embeddings_response(&request, &::http::HeaderMap::new(), response)
-				.is_err()
-		);
+		let error =
+			match provider.process_embeddings_response(&request, &::http::HeaderMap::new(), response) {
+				Ok(_) => panic!("malformed usage must still fail"),
+				Err(error) => error,
+			};
+		assert!(matches!(error, AIError::ResponseParsing(_)));
+		assert!(!error.to_string().contains(SECRET));
+		assert!(!format!("{error:?}").contains(SECRET));
 	});
 
 	let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-	assert!(logs.contains(r#""object":"list""#), "{logs}");
-	assert!(
-		logs.contains(r#""model":"text-embedding-3-small""#),
-		"{logs}"
-	);
+	assert!(logs.contains("failed to parse response"), "{logs}");
+	assert!(logs.contains("category=\"data\""), "{logs}");
+	assert!(logs.contains("response_bytes="), "{logs}");
+	assert!(!logs.contains(SECRET));
+	assert!(!logs.contains("body="));
+	assert!(!logs.contains(r#""object":"list""#));
 }
 
 #[test]

@@ -162,7 +162,7 @@ pub mod from_messages {
 
 	pub fn translate(req: &types::messages::Request) -> Result<Vec<u8>, AIError> {
 		let xlated = translate_request(req)?;
-		serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&xlated).map_err(AIError::request_marshal)
 	}
 
 	pub fn translate_request(
@@ -170,7 +170,7 @@ pub mod from_messages {
 	) -> Result<types::responses::Request, AIError> {
 		validate_raw_request(req)?;
 		let typed = json_util::convert::<_, messages::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Messages, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Messages, err))?;
 		let messages::Request {
 			messages,
 			system,
@@ -203,7 +203,7 @@ pub mod from_messages {
 		if let Some(reasoning) = translate_reasoning(thinking, output_config.effort) {
 			rest.insert(
 				"reasoning".to_string(),
-				serde_json::to_value(reasoning).map_err(AIError::RequestMarshal)?,
+				serde_json::to_value(reasoning).map_err(AIError::request_marshal)?,
 			);
 		}
 		if let Some(text) = translate_output_format(output_config.format) {
@@ -214,7 +214,7 @@ pub mod from_messages {
 			let metadata_fields = metadata.fields.into_iter().collect::<BTreeMap<_, _>>();
 			rest.insert(
 				"metadata".to_string(),
-				serde_json::to_value(metadata_fields).map_err(AIError::RequestMarshal)?,
+				serde_json::to_value(metadata_fields).map_err(AIError::request_marshal)?,
 			);
 		}
 
@@ -389,11 +389,8 @@ pub mod from_messages {
 				},
 				// OpenAI Responses has no equivalent of an Anthropic server-executed
 				// tool (e.g. web_search_20250305); drop it rather than fail the whole request.
-				messages::Tool::Server(tool) => {
-					tracing::warn!(
-						"Unsupported server tool in responses conversion: {:?}",
-						tool
-					);
+				messages::Tool::Server(_) => {
+					tracing::warn!("Unsupported server tool in responses conversion");
 				},
 			}
 		}
@@ -526,7 +523,7 @@ pub mod from_messages {
 					cache_control: _,
 				} => {
 					flush_output_message(&mut text_parts, out);
-					let arguments = serde_json::to_string(&input).map_err(AIError::RequestMarshal)?;
+					let arguments = serde_json::to_string(&input).map_err(AIError::request_marshal)?;
 					// Messages preserves the call ID, not the optional Responses item ID.
 					out.push(types::responses::RawInputItem::from_value(json!({
 						"type": "function_call",
@@ -1548,10 +1545,7 @@ pub mod from_messages {
 						);
 					},
 					responses::ResponseStreamEvent::ResponseError(error) => {
-						tracing::warn!(
-							"Responses stream error during messages translation: {}",
-							error.message
-						);
+						tracing::warn!("Responses stream error during messages translation");
 						state.failed = true;
 						push_event(
 							&mut events,

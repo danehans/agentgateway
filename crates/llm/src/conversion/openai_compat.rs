@@ -16,12 +16,12 @@ pub mod from_responses {
 	/// Translate an OpenAI Responses request into an OpenAI-compatible chat completions request.
 	pub fn translate(req: &types::responses::Request) -> Result<Vec<u8>, AIError> {
 		let translated = translate_request(req)?;
-		serde_json::to_vec(&translated.request).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&translated.request).map_err(AIError::request_marshal)
 	}
 
 	pub fn translate_request(req: &types::responses::Request) -> Result<TranslatedRequest, AIError> {
 		let mut typed = json::convert::<_, responses::CreateResponse>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Responses, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Responses, err))?;
 		let namespaces =
 			crate::conversion::namespace_tools::NamespaceToolMap::rewrite_request(&mut typed)?;
 		Ok(TranslatedRequest {
@@ -400,10 +400,7 @@ pub mod from_responses {
 				| ToolChoiceParam::ProgrammaticToolCalling
 				| ToolChoiceParam::ApplyPatch
 				| ToolChoiceParam::Shell => {
-					tracing::warn!(
-						"Unsupported tool choice for OpenAI-compatible chat completions: {:?}",
-						tc
-					);
+					tracing::warn!("Unsupported tool choice for OpenAI-compatible chat completions");
 					None
 				},
 			}
@@ -516,7 +513,7 @@ pub mod to_responses {
 			namespaces.restore_response(&mut typed);
 		}
 		let passthrough =
-			json::convert::<_, types::responses::Response>(&typed).map_err(AIError::ResponseParsing)?;
+			json::convert::<_, types::responses::Response>(&typed).map_err(AIError::response_parsing)?;
 		Ok(Box::new(passthrough))
 	}
 

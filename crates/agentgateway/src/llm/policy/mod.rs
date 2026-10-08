@@ -785,11 +785,11 @@ impl Policy {
 		if !self.has_request_body_mutations() {
 			// Fast path: directly bytes to typed
 			return serde_json::from_slice(bytes.as_ref())
-				.map_err(|err| AIError::RequestParsing(T::input_format(), err));
+				.map_err(|err| AIError::request_parsing(T::input_format(), err));
 		}
 		// Slow path: bytes --> json (transform) --> typed
 		let v: serde_json::Value = serde_json::from_slice(bytes.as_ref())
-			.map_err(|err| AIError::RequestParsing(T::input_format(), err))?;
+			.map_err(|err| AIError::request_parsing(T::input_format(), err))?;
 		self.unmarshal_request_value(v, log)
 	}
 
@@ -799,7 +799,7 @@ impl Policy {
 		log: &mut Option<&mut RequestLog>,
 	) -> Result<T, AIError> {
 		let v = self.apply_request_body_mutations(v, log)?;
-		serde_json::from_value(v).map_err(|err| AIError::RequestParsing(T::input_format(), err))
+		serde_json::from_value(v).map_err(|err| AIError::request_parsing(T::input_format(), err))
 	}
 
 	pub fn apply_request_body_mutations(
@@ -854,7 +854,7 @@ impl Policy {
 			return Ok(body);
 		}
 		let v: serde_json::Value =
-			serde_json::from_slice(body.as_slice()).map_err(AIError::RequestMarshal)?;
+			serde_json::from_slice(body.as_slice()).map_err(AIError::request_marshal)?;
 		let exec = cel::Executor::new_llm(log.as_ref().and_then(|x| x.request_snapshot.as_deref()), &v);
 		let to_set: Vec<_> = self
 			.final_transformations
@@ -878,7 +878,7 @@ impl Policy {
 				},
 			}
 		}
-		serde_json::to_vec(&serde_json::Value::Object(map)).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&serde_json::Value::Object(map)).map_err(AIError::request_marshal)
 	}
 
 	fn eval_transformation_expression(

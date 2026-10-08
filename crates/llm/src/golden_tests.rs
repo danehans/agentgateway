@@ -107,7 +107,7 @@ mod requests {
 
 	fn apply_test_prompts<R: RequestType + Serialize>(r: &mut R) -> Result<Vec<u8>, AIError> {
 		apply_test_prompts_to(r);
-		serde_json::to_vec(r).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(r).map_err(AIError::request_marshal)
 	}
 
 	fn apply_test_prompts_to<R: RequestType + ?Sized>(r: &mut R) {
@@ -361,7 +361,7 @@ mod requests {
 			for provider in *providers {
 				match *provider {
 					ANTHROPIC => test_request(ANTHROPIC, &path, |i: &mut types::messages::Request| {
-						serde_json::to_vec(i).map_err(AIError::RequestMarshal)
+						serde_json::to_vec(i).map_err(AIError::request_marshal)
 					}),
 					COMPLETIONS => test_request(COMPLETIONS, &path, |i| {
 						conversion::completions::from_messages::translate(i)
@@ -370,7 +370,7 @@ mod requests {
 						conversion::bedrock::from_messages::translate(i, &bedrock, None, None).map(|r| r.body)
 					}),
 					VERTEX => test_request(VERTEX, &path, |i: &mut types::messages::Request| {
-						let body = serde_json::to_vec(i).map_err(AIError::RequestMarshal)?;
+						let body = serde_json::to_vec(i).map_err(AIError::request_marshal)?;
 						vertex.prepare_anthropic_message_body(body)
 					}),
 					RESPONSES => test_request(RESPONSES, &path, |i| {
@@ -424,7 +424,7 @@ mod requests {
 			for provider in *providers {
 				match *provider {
 					OPENAI => test_request(OPENAI, &path, |i: &mut types::embeddings::Request| {
-						serde_json::to_vec(i).map_err(AIError::RequestMarshal)
+						serde_json::to_vec(i).map_err(AIError::request_marshal)
 					}),
 					BEDROCK_TITAN => test_request(
 						BEDROCK_TITAN,
@@ -484,7 +484,7 @@ mod requests {
 			for provider in *providers {
 				match *provider {
 					COHERE => test_request(COHERE, &path, |i: &mut types::rerank::Request| {
-						serde_json::to_vec(i).map_err(AIError::RequestMarshal)
+						serde_json::to_vec(i).map_err(AIError::request_marshal)
 					}),
 					BEDROCK => test_request(BEDROCK, &path, |i: &mut types::rerank::Request| {
 						let mut resolved = i.clone();
@@ -514,7 +514,7 @@ mod requests {
 			for provider in *providers {
 				match *provider {
 					ANTHROPIC => test_request(ANTHROPIC, &path, |i: &mut types::count_tokens::Request| {
-						serde_json::to_vec(i).map_err(AIError::RequestMarshal)
+						serde_json::to_vec(i).map_err(AIError::request_marshal)
 					}),
 					BEDROCK => test_request(BEDROCK, &path, |i: &mut types::count_tokens::Request| {
 						conversion::bedrock::from_anthropic_token_count::translate(i, &headers)
@@ -522,7 +522,7 @@ mod requests {
 					VERTEX => test_request(VERTEX, &path, |i: &mut types::count_tokens::Request| {
 						let mut resolved = i.clone();
 						resolved.model = Some("anthropic/claude-sonnet-4-5".into());
-						let body = serde_json::to_vec(&resolved).map_err(AIError::RequestMarshal)?;
+						let body = serde_json::to_vec(&resolved).map_err(AIError::request_marshal)?;
 						vertex.prepare_anthropic_count_tokens_body(body)
 					}),
 					other => panic!("unsupported provider in COUNT_TOKENS_REQUESTS: {other}"),
@@ -568,7 +568,7 @@ mod requests {
 		for name in GEMINI_REQUESTS {
 			let path = format!("requests/gemini/{name}.json");
 			test_request(GEMINI_NATIVE, &path, |i: &mut types::gemini::Request| {
-				serde_json::to_vec(&i.inner).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(&i.inner).map_err(AIError::request_marshal)
 			});
 		}
 
@@ -577,7 +577,7 @@ mod requests {
 			"requests/policies/gemini_with_system.json",
 			|i: &mut types::gemini::Request| {
 				apply_test_prompts_to(i);
-				serde_json::to_vec(&i.inner).map_err(AIError::RequestMarshal)
+				serde_json::to_vec(&i.inner).map_err(AIError::request_marshal)
 			},
 		);
 	}
@@ -1164,7 +1164,7 @@ mod responses {
 					MESSAGES_TO_MESSAGES => test_response(provider, &path, |i| {
 						serde_json::from_slice::<types::messages::Response>(&i)
 							.map(|e| Box::new(e) as Box<dyn ResponseType>)
-							.map_err(AIError::ResponseParsing)
+							.map_err(AIError::response_parsing)
 					}),
 					MESSAGES_TO_COMPLETIONS => test_response(provider, &path, |i| {
 						conversion::messages::from_completions::translate_response(&i)
@@ -1187,7 +1187,7 @@ mod responses {
 					COMPLETIONS_TO_COMPLETIONS => test_response(provider, &path, |i| {
 						serde_json::from_slice::<types::completions::Response>(&i)
 							.map(|e| Box::new(e) as Box<dyn ResponseType>)
-							.map_err(AIError::ResponseParsing)
+							.map_err(AIError::response_parsing)
 					}),
 					COMPLETIONS_TO_MESSAGES => test_response(provider, &path, |i| {
 						conversion::completions::from_messages::translate_response(&i)
@@ -1213,7 +1213,7 @@ mod responses {
 					RESPONSES_TO_RESPONSES => test_response(provider, &path, |bytes| {
 						serde_json::from_slice::<types::responses::Response>(&bytes)
 							.map(|response| Box::new(response) as Box<dyn ResponseType>)
-							.map_err(AIError::ResponseParsing)
+							.map_err(AIError::response_parsing)
 					}),
 					RESPONSES_TO_DETECT => test_response(provider, &path, |bytes| {
 						Ok(Box::new(
@@ -1238,7 +1238,7 @@ mod responses {
 			test_response(GEMINI_NATIVE, &path, |i| {
 				serde_json::from_slice::<types::gemini::Response>(&i)
 					.map(|e| Box::new(e) as Box<dyn ResponseType>)
-					.map_err(AIError::ResponseParsing)
+					.map_err(AIError::response_parsing)
 			});
 		}
 	}
@@ -1313,7 +1313,7 @@ mod responses {
 				OPENAI => test_response(provider, path, |i| {
 					serde_json::from_slice::<types::embeddings::Response>(&i)
 						.map(|e| Box::new(e) as Box<dyn ResponseType>)
-						.map_err(AIError::ResponseParsing)
+						.map_err(AIError::response_parsing)
 				}),
 				other => panic!("unsupported provider in EMBEDDING_RESPONSES: {other}"),
 			}
@@ -1333,7 +1333,7 @@ mod responses {
 				COHERE => test_response(provider, path, |i| {
 					types::rerank::parse_response_lenient(&i)
 						.map(|e| Box::new(e) as Box<dyn ResponseType>)
-						.map_err(AIError::ResponseParsing)
+						.map_err(AIError::response_parsing)
 				}),
 				other => panic!("unsupported provider in RERANK_RESPONSES: {other}"),
 			}

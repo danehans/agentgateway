@@ -57,6 +57,22 @@ Run the agentgateway binary:
 ```
 Open your browser and navigate to `http://localhost:15000/ui` to see the agentgateway UI.
 
+### LLM diagnostics and traffic privacy
+
+JSON parsing and serialization errors in the LLM path retain only a fixed error
+category and integer line/column. Use `AIError::request_parsing`,
+`request_marshal`, `response_parsing` or `response_marshal` to construct them;
+do not keep the original Serde message or attach it as an error source. Serde
+messages can contain request values, response values and custom serializer text.
+The logged response parser adds byte count without recording a body excerpt.
+
+Automatic conversion diagnostics, including DEBUG/TRACE, must not write text,
+tool definitions, tool arguments, stream payloads or provider error messages.
+Use fixed event names and bounded counts. Explicit content-observability settings
+are a separate operator choice; metadata-only configurations still need these
+diagnostic protections. The focused `diagnostic` library cases check captured
+events, formatted errors and error chains with synthetic sensitive sentinels.
+
 ## Local Development with Tilt (Kubernetes)
 
 For developing against a local Kind cluster with live reloading:

@@ -63,7 +63,7 @@ pub fn translate_google_error(bytes: &Bytes) -> Result<Bytes, crate::AIError> {
 		},
 	};
 	Ok(Bytes::from(
-		serde_json::to_vec(&m).map_err(crate::AIError::ResponseMarshal)?,
+		serde_json::to_vec(&m).map_err(crate::AIError::response_marshal)?,
 	))
 }
 
@@ -101,14 +101,14 @@ pub mod from_messages {
 	/// translate an Anthropic messages to an OpenAI completions request
 	pub fn translate(req: &types::messages::Request) -> Result<Vec<u8>, AIError> {
 		let xlated = translate_request(req)?;
-		serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&xlated).map_err(AIError::request_marshal)
 	}
 
 	pub fn translate_request(
 		req: &types::messages::Request,
 	) -> Result<types::completions::typed::Request, AIError> {
 		let typed = json::convert::<_, messages::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Messages, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Messages, err))?;
 		Ok(translate_internal(typed))
 	}
 
@@ -810,7 +810,7 @@ pub mod from_messages {
 			},
 		};
 		Ok(Bytes::from(
-			serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+			serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 		))
 	}
 
@@ -1180,11 +1180,8 @@ pub mod from_messages {
 				},
 				// OpenAI completions has no equivalent of an Anthropic server-executed tool
 				// (e.g. web_search_20250305); drop it rather than fail the whole request.
-				messages::Tool::Server(tool) => {
-					tracing::warn!(
-						"Unsupported server tool in completions conversion: {:?}",
-						tool
-					);
+				messages::Tool::Server(_) => {
+					tracing::warn!("Unsupported server tool in completions conversion");
 					None
 				},
 			})
@@ -1459,7 +1456,7 @@ pub fn passthrough_stream(
 						}
 					},
 					Some(Err(e)) => {
-						debug!("failed to parse streaming response: {e}");
+						debug!(error = %e, "failed to parse streaming response");
 					},
 					None => {
 						// We are done, try to set completion if we haven't already

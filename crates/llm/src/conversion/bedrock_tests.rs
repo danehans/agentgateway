@@ -10,6 +10,39 @@ use super::*;
 use crate::bedrock::Provider;
 use crate::types;
 
+#[test]
+fn test_responses_conversion_diagnostics_withhold_text_and_invalid_arguments() {
+	let secret = "openshield-private-bedrock-sentinel";
+	let provider = Provider {
+		model_override: None,
+		region: strng::new("us-east-1"),
+		guardrail_identifier: None,
+		guardrail_version: None,
+		endpoint_preference: Default::default(),
+	};
+	let request: types::responses::Request = serde_json::from_value(json!({
+		"model": "gpt-4o",
+		"max_output_tokens": 16,
+		"input": [
+			{"role": "user", "content": [{"type": "input_text", "text": secret}]},
+			{"type": "function_call", "call_id": "call_1", "name": secret, "arguments": secret}
+		]
+	}))
+	.unwrap();
+	let (result, events) = crate::diagnostic_tests::capture_diagnostics(|| {
+		super::from_responses::translate(&request, &provider, None, None, None)
+	});
+	let translated = result.unwrap();
+	// Removing incidental diagnostics must not alter valid request content.
+	assert!(String::from_utf8(translated.body).unwrap().contains(secret));
+	assert!(
+		events.contains("Found InputText"),
+		"captured events: {events}"
+	);
+	assert!(events.contains("invalid JSON arguments"));
+	assert!(!events.contains(secret));
+}
+
 #[tokio::test]
 async fn test_append_done_on_success_omits_done_after_error() {
 	let mut body = crate::parse::sse::append_done_on_success(agent_http::Body::from_stream(
@@ -1409,10 +1442,9 @@ fn test_embeddings_response_translation_cohere_v4_requires_float_vectors() {
 	};
 
 	assert!(matches!(err, crate::AIError::ResponseParsing(_)));
-	assert!(
-		err
-			.to_string()
-			.contains("Cohere response did not include float embeddings; received types: int8, uint8")
+	assert_eq!(
+		err.to_string(),
+		"failed to parse response: data at line 0 column 0"
 	);
 }
 

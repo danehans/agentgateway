@@ -59,7 +59,7 @@ pub fn translate_anthropic_error(
 		},
 	};
 	Ok(Bytes::from(
-		serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+		serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 	))
 }
 
@@ -74,7 +74,7 @@ pub fn translate_google_error(bytes: &Bytes) -> Result<Bytes, AIError> {
 		},
 	};
 	Ok(Bytes::from(
-		serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+		serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 	))
 }
 
@@ -271,10 +271,10 @@ pub mod from_completions {
 		catalog: crate::model_catalog::Catalog<'_>,
 	) -> Result<Vec<u8>, AIError> {
 		let typed = json::convert::<_, completions::Request>(req)
-			.map_err(|err| AIError::RequestParsing(crate::InputFormat::Completions, err))?;
+			.map_err(|err| AIError::request_parsing(crate::InputFormat::Completions, err))?;
 		let model_id = typed.model.clone().unwrap_or_default();
 		let xlated = translate_internal(typed, model_id, catalog);
-		serde_json::to_vec(&xlated).map_err(AIError::RequestMarshal)
+		serde_json::to_vec(&xlated).map_err(AIError::request_marshal)
 	}
 
 	fn translate_internal(
@@ -537,7 +537,7 @@ pub mod from_completions {
 		});
 		let openai = translate_response_internal(resp);
 		let passthrough = json::convert::<_, types::completions::Response>(&openai)
-			.map_err(AIError::ResponseParsing)?;
+			.map_err(AIError::response_parsing)?;
 		Ok(Box::new(super::super::ResponseWithProviderUsage {
 			response: passthrough,
 			provider_usage,
@@ -689,7 +689,7 @@ pub mod from_completions {
 			},
 		};
 		Ok(Bytes::from(
-			serde_json::to_vec(&m).map_err(AIError::ResponseMarshal)?,
+			serde_json::to_vec(&m).map_err(AIError::response_marshal)?,
 		))
 	}
 
@@ -997,11 +997,8 @@ pub mod from_completions {
 					None
 				},
 				messages::MessagesStreamEvent::Ping => None,
-				messages::MessagesStreamEvent::Error { error } => {
-					tracing::warn!(
-						"Messages stream error during completions translation: {}",
-						error.message
-					);
+				messages::MessagesStreamEvent::Error { error: _ } => {
+					tracing::warn!("Messages stream error during completions translation");
 					None
 				},
 			}

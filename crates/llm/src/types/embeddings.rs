@@ -44,7 +44,7 @@ impl TryInto<typed::Request> for &Request {
 	type Error = AIError;
 
 	fn try_into(self) -> Result<typed::Request, Self::Error> {
-		json::convert::<_, typed::Request>(self).map_err(AIError::RequestMarshal)
+		json::convert::<_, typed::Request>(self).map_err(AIError::request_marshal)
 	}
 }
 

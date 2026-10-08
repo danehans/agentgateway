@@ -10,6 +10,12 @@ use tokio_util::codec::BytesCodec;
 use super::passthrough::parser as passthrough_parser;
 use super::transform::{TransformEvent, parser as transform_parser};
 
+fn json_diagnostic(error: serde_json::Error) -> anyhow::Error {
+	// JSON error messages can contain stream payload values. Discard them before
+	// wrapping in anyhow so every callback and formatted error remains private.
+	crate::JsonErrorDiagnostic::from(error).into()
+}
+
 /// Append an OpenAI `[DONE]` event after a body closes successfully.
 pub fn append_done_on_success(body: Body) -> Body {
 	body.transform_stream(|body| {
@@ -49,7 +55,7 @@ pub fn json_passthrough<F: DeserializeOwned>(
 			return;
 		}
 		let obj = serde_json::from_slice::<F>(&data);
-		f(Some(obj.map_err(anyhow::Error::from)))
+		f(Some(obj.map_err(json_diagnostic)))
 	})
 }
 
@@ -69,7 +75,7 @@ pub fn permissive_json_passthrough<F: DeserializeOwned>(
 			return;
 		}
 		let obj = serde_json::from_slice::<F>(&data);
-		f(Some(obj.map_err(anyhow::Error::from)))
+		f(Some(obj.map_err(json_diagnostic)))
 	})
 }
 
@@ -99,7 +105,7 @@ pub fn json_transform<I: DeserializeOwned, O: Serialize>(
 			));
 		}
 		let obj = serde_json::from_slice::<I>(&data);
-		let transformed = f(obj.map_err(anyhow::Error::from))?;
+		let transformed = f(obj.map_err(json_diagnostic))?;
 		let json_bytes = serde_json::to_vec(&transformed).ok()?;
 		Some(crate::parse::encode_sse_event("", Bytes::from(json_bytes)))
 	})
@@ -136,7 +142,7 @@ where
 					SseJsonEvent::Done
 				} else {
 					let obj = serde_json::from_slice::<I>(&data);
-					SseJsonEvent::Data(obj.map_err(anyhow::Error::from))
+					SseJsonEvent::Data(obj.map_err(json_diagnostic))
 				}
 			},
 		};
@@ -162,9 +168,7 @@ fn unwrap_sse_data(frame: Frame<Bytes>) -> Option<Bytes> {
 
 #[allow(dead_code)]
 pub(super) fn unwrap_json<T: DeserializeOwned>(frame: Frame<Bytes>) -> anyhow::Result<Option<T>> {
-	Ok(
-		unwrap_sse_data(frame)
-			.map(|b| serde_json::from_slice(&b))
-			.transpose()?,
-	)
+	unwrap_sse_data(frame)
+		.map(|b| serde_json::from_slice(&b).map_err(json_diagnostic))
+		.transpose()
 }
