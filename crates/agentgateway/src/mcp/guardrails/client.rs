@@ -423,6 +423,50 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn shared_canary_hint_is_per_invocation_and_survives_response_clone() {
+		let expression = r#""x-openshield-challenge" in request.headers ? request.headers.join()["x-openshield-challenge"] : """#;
+		let cfg = HashMap::from([(
+			"shared_canary_challenge".to_string(),
+			Arc::new(cel::Expression::new_strict(expression).unwrap()),
+		)]);
+		let nonce = "b".repeat(64);
+		for (values, expected) in [
+			(vec![], serde_json::json!("")),
+			(vec![nonce.clone()], serde_json::json!(nonce)),
+			(
+				vec![nonce.clone(), nonce.clone()],
+				serde_json::json!(format!("{nonce},{nonce}")),
+			),
+			(
+				vec!["malformed".to_string()],
+				serde_json::json!("malformed"),
+			),
+			(vec!["".to_string()], serde_json::json!("")),
+		] {
+			let mut headers = ::http::HeaderMap::new();
+			for value in values {
+				headers.append("x-openshield-challenge", value.parse().unwrap());
+			}
+			let ctx = ctx_with_headers(headers);
+			let cloned = ctx.clone();
+			for context in [&ctx, &cloned] {
+				let metadata = build_metadata(&cfg, context).unwrap();
+				let actual = serde_json::to_value(metadata).unwrap();
+				assert_eq!(actual["shared_canary_challenge"], expected);
+			}
+		}
+		let mut headers = ::http::HeaderMap::new();
+		headers.insert(
+			"x-openshield-challenge",
+			::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+		);
+		let ctx = ctx_with_headers(headers);
+		let metadata = build_metadata(&cfg, &ctx).unwrap();
+		let actual = serde_json::to_value(metadata).unwrap();
+		assert_eq!(actual["shared_canary_challenge"], serde_json::json!(""));
+	}
+
 	fn struct_from_json(v: serde_json::Value) -> ProtoStruct {
 		serde_json::from_value(v).unwrap()
 	}

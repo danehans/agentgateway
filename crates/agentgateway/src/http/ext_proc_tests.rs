@@ -6160,3 +6160,56 @@ fn gateway_process_metadata_uses_executing_process_for_both_stages() {
 		assert_eq!(json["gateway_instance"], expected["instanceId"]);
 	}
 }
+
+#[test]
+fn shared_canary_hint_preserves_http_snapshot_and_duplicate_values() {
+	let expression = r#""x-openshield-challenge" in request.headers ? request.headers.join()["x-openshield-challenge"] : """#;
+	let cfg = HashMap::from([(
+		"openshield".to_string(),
+		HashMap::from([(
+			"shared_canary_challenge".to_string(),
+			Arc::new(Expression::new_strict(expression).unwrap()),
+		)]),
+	)]);
+	let nonce = "a".repeat(64);
+	for (values, expected) in [
+		(vec![], json!("")),
+		(vec![nonce.clone()], json!(nonce)),
+		(
+			vec![nonce.clone(), nonce.clone()],
+			json!(format!("{nonce},{nonce}")),
+		),
+		(vec!["malformed".to_string()], json!("malformed")),
+		(vec!["".to_string()], json!("")),
+	] {
+		let mut req = http::Request::new(http::Body::from("{}"));
+		for value in values {
+			req
+				.headers_mut()
+				.append("x-openshield-challenge", value.parse().unwrap());
+		}
+		let snapshot = crate::cel::snapshot_request(&mut req, false);
+		// A response-time header change cannot change the frozen request view.
+		req
+			.headers_mut()
+			.insert("x-openshield-challenge", "substituted".parse().unwrap());
+		let resp = http::Response::new(http::Body::from("{}"));
+		let exec = crate::cel::Executor::new_response(Some(&snapshot), &resp);
+		let context = ext_proc::build_processing_metadata_context(&exec, Some(&cfg)).unwrap();
+		let actual = serde_json::to_value(&context["openshield"]).unwrap();
+		assert_eq!(actual["shared_canary_challenge"], expected);
+		let exec = crate::cel::Executor::new_request_snapshot(Some(&snapshot));
+		let context = ext_proc::build_processing_metadata_context(&exec, Some(&cfg)).unwrap();
+		let actual = serde_json::to_value(&context["openshield"]).unwrap();
+		assert_eq!(actual["shared_canary_challenge"], expected);
+	}
+	let mut req = http::Request::new(http::Body::from("{}"));
+	req.headers_mut().insert(
+		"x-openshield-challenge",
+		::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+	);
+	let exec = crate::cel::Executor::new_request(&req);
+	let context = ext_proc::build_processing_metadata_context(&exec, Some(&cfg)).unwrap();
+	let actual = serde_json::to_value(&context["openshield"]).unwrap();
+	assert_eq!(actual["shared_canary_challenge"], json!(""));
+}
