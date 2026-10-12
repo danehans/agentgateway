@@ -1451,6 +1451,9 @@ func TranslateModelCallout(ctx PolicyCtx, namespace string, callout *agentgatewa
 		Body: castCELPtr(callout.Body, func(expr agentgateway.CELExpression) {
 			errs = append(errs, fmt.Errorf("callout body is not a valid CEL expression: %s", expr))
 		}),
+		Metadata: castCELMap(callout.Metadata, func(key string, expr agentgateway.CELExpression) {
+			errs = append(errs, fmt.Errorf("callout metadata %q is not a valid CEL expression: %s", key, expr))
+		}),
 		Transformation: castCELMap(callout.Transformation, func(key string, expr agentgateway.CELExpression) {
 			errs = append(errs, fmt.Errorf("callout transformation %q is not a valid CEL expression: %s", key, expr))
 		}),

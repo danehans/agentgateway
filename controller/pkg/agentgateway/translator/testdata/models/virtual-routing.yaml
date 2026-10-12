@@ -134,6 +134,8 @@ spec:
       headers:
         x-tenant: request.headers["x-tenant"]
       body: 'json({"messages": llm.messages})'
+      metadata:
+        model_router: "{'model': callout.body.model, 'reason': 'classified'}"
       transformation:
         model: callout.body.model
         reasoning_effort: callout.body.effort
@@ -304,6 +306,8 @@ output:
           inlinePolicies:
           - backendTls:
               hostname: router.example.com
+          metadata:
+            model_router: '{''model'': callout.body.model, ''reason'': ''classified''}'
           path: /v1/route
           target:
             inline:

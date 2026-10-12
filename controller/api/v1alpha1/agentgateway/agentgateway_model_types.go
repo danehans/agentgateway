@@ -406,6 +406,14 @@ type CalloutModelRouting struct {
 	// +required
 	Transformation map[string]CELExpression `json:"transformation"`
 
+	// CEL expressions exported as request-scoped metadata after a valid model selection.
+	// Response transformations can read metadata.<key>. Nothing is exported by default.
+	// Expressions can reference callout.body and callout.headers. Evaluation errors
+	// and null values omit the key; metadata does not modify the inference body.
+	// +kubebuilder:validation:MaxProperties=64
+	// +optional
+	Metadata map[string]CELExpression `json:"metadata,omitempty"`
+
 	// Model used when the callout fails, returns a non-2xx or non-JSON
 	// response, or selects an unknown model. `transformation` is not applied to
 	// the fallback. If unset, the request is rejected.

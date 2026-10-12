@@ -13005,6 +13005,13 @@
             "$ref": "#/$defs/Expression"
           }
         },
+        "metadata": {
+          "description": "CEL expressions exported as request-scoped metadata after a valid model selection.\nAvailable to response transformations as `metadata.<key>`. Nothing is exported by default.\nEvaluation errors and null values omit the key. Values never enter the inference body.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Expression"
+          }
+        },
         "failureMode": {
           "description": "Behavior when the callout fails, returns a non-2xx or non-JSON response, or selects an unknown model.\nDefaults to `failClosed`.",
           "$ref": "#/$defs/VirtualModelCalloutFailureMode",

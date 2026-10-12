@@ -1913,6 +1913,16 @@ impl ModelRoute {
 								.body
 								.as_ref()
 								.map(|expr| permissive_cel_expression_arc(diagnostics, field("body"), expr)),
+							metadata: callout
+								.metadata
+								.iter()
+								.map(|(k, v)| {
+									(
+										k.clone(),
+										permissive_cel_expression_arc(diagnostics, field(&format!("metadata.{k}")), v),
+									)
+								})
+								.collect(),
 							transformation: callout
 								.transformation
 								.iter()

@@ -502,6 +502,15 @@ impl ModelRouter {
 				};
 				match (selection, &callout.failure_mode) {
 					(Some(selection), _) => {
+						if !selection.metadata.is_empty() {
+							req
+								.extensions_mut()
+								.get_or_insert_with(
+									crate::http::transformation_cel::TransformationMetadata::default,
+								)
+								.0
+								.extend(selection.metadata);
+						}
 						if let RequestedModelLocation::Body(Value::Object(body)) = &mut location {
 							for (k, v) in selection.fields {
 								match v {
@@ -1250,6 +1259,13 @@ mod tests {
 			.mount(&server)
 			.await;
 
+		Mock::given(path("/unknown"))
+			.respond_with(
+				ResponseTemplate::new(200).set_body_json(serde_json::json!({"model":"not-configured"})),
+			)
+			.mount(&server)
+			.await;
+
 		let model = |name: &str| ModelRoute {
 			discovery: None,
 			id: None,
@@ -1293,6 +1309,11 @@ mod tests {
 							"reasoning_effort": "callout.body.effort",
 							"route": "callout.headers['x-route']",
 						},
+						"metadata": {
+							"model_router": "{'model': callout.body.model, 'fallback': false, 'reason': callout.headers['x-route']}",
+							"missing": "callout.body.absent",
+							"null_value": "null",
+						},
 						"cache": {"key": ["request.headers['x-session']"], "ttl": "1m"},
 					}),
 				),
@@ -1302,6 +1323,15 @@ mod tests {
 						"host": format!("http://{}/fail", server.address()),
 						"transformation": {"model": "callout.body.model"},
 						"failureMode": {"fallback": "economy-model"},
+					}),
+				),
+				callout(
+					"unknown",
+					serde_json::json!({
+						"host": format!("http://{}/unknown", server.address()),
+						"transformation": {"model":"callout.body.model"},
+						"metadata": {"model_router":"callout.body"},
+						"failureMode": {"fallback":"economy-model"},
 					}),
 				),
 				callout(
@@ -1338,6 +1368,16 @@ mod tests {
 		for _ in 0..2 {
 			let (result, req) = resolve("auto").await;
 			assert!(matches!(result, ResolveResult::Backend(_)));
+			let metadata = &req
+				.extensions()
+				.get::<crate::http::transformation_cel::TransformationMetadata>()
+				.expect("exported metadata")
+				.0;
+			assert_eq!(metadata.len(), 1);
+			assert_eq!(
+				metadata["model_router"],
+				serde_json::json!({"model":"premium-model", "fallback":false, "reason":"r1"})
+			);
 			assert_eq!(
 				body(req).await,
 				serde_json::json!({
@@ -1351,6 +1391,22 @@ mod tests {
 
 		let (result, req) = resolve("fallback").await;
 		assert!(matches!(result, ResolveResult::Backend(_)));
+		assert!(
+			req
+				.extensions()
+				.get::<crate::http::transformation_cel::TransformationMetadata>()
+				.is_none()
+		);
+		assert_eq!(body(req).await["model"], "economy-model");
+
+		let (result, req) = resolve("unknown").await;
+		assert!(matches!(result, ResolveResult::Backend(_)));
+		assert!(
+			req
+				.extensions()
+				.get::<crate::http::transformation_cel::TransformationMetadata>()
+				.is_none()
+		);
 		assert_eq!(body(req).await["model"], "economy-model");
 
 		let (result, _) = resolve("closed").await;

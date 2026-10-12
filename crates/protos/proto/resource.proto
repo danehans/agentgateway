@@ -2364,6 +2364,9 @@ message ModelRoute {
       optional string fallback_model = 7;
       // Reuse callout responses.
       TrafficPolicySpec.ExternalAuth.Cache cache = 8;
+      // Explicit CEL projections exported as request-scoped transformation metadata.
+      map<string, string> metadata = 9;
+
     }
 
     oneof routing {

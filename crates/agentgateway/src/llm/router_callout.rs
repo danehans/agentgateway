@@ -42,6 +42,11 @@ pub struct VirtualModelCallout {
 	/// `callout.headers` holds the response headers and `callout.body` the decoded JSON response body.
 	/// `model` is required and selects the target from `llm.models`.
 	pub transformation: HashMap<String, Arc<Expression>>,
+	/// CEL expressions exported as request-scoped metadata after a valid model selection.
+	/// Available to response transformations as `metadata.<key>`. Nothing is exported by default.
+	/// Evaluation errors and null values omit the key. Values never enter the inference body.
+	#[serde(default, skip_serializing_if = "HashMap::is_empty")]
+	pub metadata: HashMap<String, Arc<Expression>>,
 	/// Behavior when the callout fails, returns a non-2xx or non-JSON response, or selects an unknown model.
 	/// Defaults to `failClosed`.
 	#[serde(default)]
@@ -78,6 +83,7 @@ pub struct CalloutSelection {
 	pub model: String,
 	/// Request payload fields to set. `None` removes the field.
 	pub fields: Vec<(String, Option<JsonValue>)>,
+	pub metadata: serde_json::Map<String, JsonValue>,
 }
 
 impl VirtualModelCallout {
@@ -248,9 +254,18 @@ impl VirtualModelCallout {
 				fields.push((k.clone(), exec.eval(expr).ok().and_then(|v| v.json().ok())));
 			}
 		}
+		let metadata = self
+			.metadata
+			.iter()
+			.filter_map(|(key, expr)| {
+				let value = exec.eval(expr).ok()?.json().ok()?;
+				(!value.is_null()).then(|| (key.clone(), value))
+			})
+			.collect();
 		Ok(CalloutSelection {
 			model: model.context("callout transformation must set model")?,
 			fields,
+			metadata,
 		})
 	}
 }

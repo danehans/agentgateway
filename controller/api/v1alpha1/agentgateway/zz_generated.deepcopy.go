@@ -2180,6 +2180,13 @@ func (in *CalloutModelRouting) DeepCopyInto(out *CalloutModelRouting) {
 			(*out)[key] = val
 		}
 	}
+	if in.Metadata != nil {
+		in, out := &in.Metadata, &out.Metadata
+		*out = make(map[string]CELExpression, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.Fallback != nil {
 		in, out := &in.Fallback, &out.Fallback
 		*out = new(ModelTargetReference)

@@ -5451,6 +5451,19 @@ spec:
                           pseudo-headers.
                         maxProperties: 64
                         type: object
+                      metadata:
+                        additionalProperties:
+                          description: A Common Expression Language (CEL) expression.
+                          maxLength: 16384
+                          minLength: 1
+                          type: string
+                        description: |-
+                          CEL expressions exported as request-scoped metadata after a valid model selection.
+                          Response transformations can read metadata.<key>. Nothing is exported by default.
+                          Expressions can reference callout.body and callout.headers. Evaluation errors
+                          and null values omit the key; metadata does not modify the inference body.
+                        maxProperties: 64
+                        type: object
                       transformation:
                         additionalProperties:
                           description: A Common Expression Language (CEL) expression.
