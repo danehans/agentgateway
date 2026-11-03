@@ -117,6 +117,7 @@ impl ContextBuilder {
 	) -> Option<RequestSnapshot> {
 		if self.any_has(Attributes::Source)
 			|| self.any_has(Attributes::Destination)
+			|| self.any_has(Attributes::Substrate)
 			|| self.any_has(Attributes::Request)
 			|| self.any_has(Attributes::Llm)
 			|| self.any_has(Attributes::Proxy)

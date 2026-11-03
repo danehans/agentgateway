@@ -1249,6 +1249,35 @@
       },
       "additionalProperties": false
     },
+    "substrate": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "egressPolicy": {
+          "type": "object",
+          "properties": {
+            "uid": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "uid",
+            "version"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "egressPolicy"
+      ]
+    },
     "mcp": {
       "description": "`mcp` contains attributes about the MCP request.\nRequest-time CEL includes identity fields (`tool`, `prompt`, `resource`,\n`task`) plus `methodName`. Post-request CEL may also include fields like\n`sessionId`, tool payloads, and list results.",
       "type": [

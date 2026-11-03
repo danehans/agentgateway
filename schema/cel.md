@@ -172,6 +172,10 @@
 |`destination.address`|string|The IP address of the downstream request destination at agentgateway.|
 |`destination.port`|integer|The port of the downstream request destination at agentgateway.|
 |`destination.hostname`|string|The requested destination hostname, when known. For TLS connections this is the sniffed SNI.|
+|`substrate`|object||
+|`substrate.egressPolicy`|object||
+|`substrate.egressPolicy.uid`|string||
+|`substrate.egressPolicy.version`|integer||
 |`mcp`|object|`mcp` contains attributes about the MCP request.<br>Request-time CEL includes identity fields (`tool`, `prompt`, `resource`,<br>`task`) plus `methodName`. Post-request CEL may also include fields like<br>`sessionId`, tool payloads, and list results.|
 |`mcp.methodName`|string||
 |`mcp.sessionId`|string||
