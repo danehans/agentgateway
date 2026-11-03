@@ -78,6 +78,7 @@ flagset::flags! {
 	pub enum Attributes: u32 {
 		Source,
 		Destination,
+		Substrate,
 
 		Request,
 		RequestBody,
@@ -228,6 +229,9 @@ pub fn attributes_for(expression: &cel::IdedExpr) -> FlagSet<Attributes> {
 			},
 			["destination", ..] => {
 				attributes |= Attributes::Destination;
+			},
+			["substrate", ..] => {
+				attributes |= Attributes::Substrate;
 			},
 			["backend", ..] => {
 				attributes |= Attributes::Backend;
