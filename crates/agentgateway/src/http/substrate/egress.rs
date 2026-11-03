@@ -122,6 +122,7 @@ impl RequestPolicyTrait for SubstrateEgress {
 		log: &mut RequestLog,
 		req: &mut Request,
 	) -> Result<PolicyResponse, ProxyError> {
+		req.extensions_mut().remove::<cel::SubstrateContext>();
 		let identity = req
 			.extensions()
 			.get::<ActorIdentity>()
@@ -133,7 +134,7 @@ impl RequestPolicyTrait for SubstrateEgress {
 		log.ate_actor_uid = identity.actor_uid.clone();
 		log.ate_atespace = Some(identity.atespace.clone());
 		let policy = fetch_policy(&self.target, client, &identity).await?;
-		let matched_rule = matching_rule(&policy, req)?;
+		let matched_rule = authorize_request(&policy, req)?;
 		// Dynamic forwarding uses the authorized name and the original destination
 		// port. A port supplied in the HTTP authority must not change the dial target.
 		let destination = req
@@ -147,7 +148,7 @@ impl RequestPolicyTrait for SubstrateEgress {
 			.unwrap_or(hostname);
 		let target = Target::from((hostname, destination.port));
 		req.extensions_mut().insert(DynamicBackendOverride(target));
-		self
+		if let Err(error) = self
 			.apply_effects(
 				client,
 				&identity,
@@ -163,9 +164,30 @@ impl RequestPolicyTrait for SubstrateEgress {
 					}),
 				req,
 			)
-			.await?;
+			.await
+		{
+			req.extensions_mut().remove::<cel::SubstrateContext>();
+			return Err(error);
+		}
 		Ok(PolicyResponse::default())
 	}
+}
+
+fn authorize_request<'a>(
+	policy: &'a protos::ateapi::EgressPolicy,
+	req: &mut Request,
+) -> Result<&'a protos::ateapi::EgressRule, ProxyError> {
+	req.extensions_mut().remove::<cel::SubstrateContext>();
+	let matched_rule = matching_rule(policy, req)?;
+	if let Some(metadata) = &policy.metadata {
+		req.extensions_mut().insert(cel::SubstrateContext {
+			egress_policy: cel::SubstrateEgressPolicyContext {
+				uid: metadata.uid.clone(),
+				version: metadata.version,
+			},
+		});
+	}
+	Ok(matched_rule)
 }
 
 pub(crate) fn reject_upgrade(req: &Request) -> Result<(), ProxyError> {
@@ -867,6 +889,43 @@ mod tests {
 		req.extensions_mut().insert(EgressRequestProtocol::Http);
 		req.extensions_mut().remove::<cel::DestinationContext>();
 		assert!(matching_rule(&policy, &req).is_err());
+	}
+
+	#[test]
+	fn policy_context_only_tracks_allowed_requests_with_metadata() {
+		let mut policy = protos::ateapi::EgressPolicy {
+			metadata: Some(protos::ateapi::ResourceMetadata {
+				uid: "policy-uid".to_owned(),
+				version: 42,
+			}),
+			rules: vec![rule(
+				EgressRequestProtocol::Http,
+				&["allowed.example"],
+				None,
+			)],
+		};
+		let mut req = request(EgressRequestProtocol::Http, "allowed.example", 80);
+		assert!(authorize_request(&policy, &mut req).is_ok());
+		let context = req.extensions().get::<cel::SubstrateContext>().unwrap();
+		assert_eq!(context.egress_policy.uid, "policy-uid");
+		assert_eq!(context.egress_policy.version, 42);
+
+		req.extensions_mut().insert(cel::DestinationContext {
+			address: "192.0.2.1".parse().unwrap(),
+			port: 80,
+			hostname: Some("denied.example".into()),
+		});
+		assert!(authorize_request(&policy, &mut req).is_err());
+		assert!(req.extensions().get::<cel::SubstrateContext>().is_none());
+
+		policy.metadata = None;
+		req.extensions_mut().insert(cel::DestinationContext {
+			address: "192.0.2.1".parse().unwrap(),
+			port: 80,
+			hostname: Some("allowed.example".into()),
+		});
+		assert!(authorize_request(&policy, &mut req).is_ok());
+		assert!(req.extensions().get::<cel::SubstrateContext>().is_none());
 	}
 
 	fn passthrough(

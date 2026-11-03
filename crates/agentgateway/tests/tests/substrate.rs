@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use agentgateway::test_helpers::{ateapimock, credprovidermock, oteltracemock};
+use agentgateway::test_helpers::{ateapimock, credprovidermock, extprocmock, oteltracemock};
 use agentgateway::transport::stream::{SocketType, TLSConnectionInfo};
 use agentgateway::transport::tls::TlsInfo;
 use agentgateway::types::agent::{Backend, BackendWithPolicies, BindMode, TunnelProtocol};
@@ -1838,6 +1838,249 @@ async fn open_actor_egress_tunnel(gateway: &TestBind, port: u16) -> tokio::io::D
 	}
 }
 
+#[derive(Clone)]
+struct PolicyContextHandler {
+	policy: Arc<StdMutex<Option<EgressPolicy>>>,
+}
+
+#[async_trait::async_trait]
+impl ateapimock::Handler for PolicyContextHandler {
+	async fn get_actor(
+		&mut self,
+		_request: &protos::ateapi::GetActorRequest,
+	) -> Result<Actor, tonic::Status> {
+		Ok(Actor {
+			metadata: Some(ResourceMetadata {
+				uid: ACTOR_UID.to_owned(),
+				..Default::default()
+			}),
+			status: Some(ActorStatus {
+				state: ActorState::Running as i32,
+				worker_assignment: None,
+			}),
+		})
+	}
+
+	async fn get_actor_egress_policy(
+		&mut self,
+		_request: &protos::ateapi::GetActorEgressPolicyRequest,
+	) -> Result<EgressPolicy, tonic::Status> {
+		self
+			.policy
+			.lock()
+			.unwrap()
+			.clone()
+			.ok_or_else(|| tonic::Status::not_found("actor egress policy deleted"))
+	}
+}
+
+#[derive(Clone)]
+struct PolicyContextExtProc {
+	seen: Arc<StdMutex<Vec<prost_wkt_types::Struct>>>,
+	opens: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl extprocmock::Handler for PolicyContextExtProc {
+	async fn on_open(&mut self, _metadata: &tonic::metadata::MetadataMap) {
+		self.opens.fetch_add(1, Ordering::Relaxed);
+	}
+
+	async fn on_request(&mut self, request: &agentgateway::http::ext_proc::proto::ProcessingRequest) {
+		if matches!(
+			request.request.as_ref(),
+			Some(agentgateway::http::ext_proc::proto::processing_request::Request::RequestHeaders(_))
+		) {
+			let context = request.metadata_context.as_ref().unwrap();
+			self
+				.seen
+				.lock()
+				.unwrap()
+				.push(context.filter_metadata["policy"].clone());
+		}
+	}
+}
+
+async fn policy_context_gateway(
+	port: u16,
+) -> (
+	TestBind,
+	Arc<StdMutex<Option<EgressPolicy>>>,
+	Arc<StdMutex<Vec<prost_wkt_types::Struct>>>,
+	Arc<AtomicUsize>,
+	agentgateway::test_helpers::MockInstance,
+	agentgateway::test_helpers::MockInstance,
+) {
+	let policy = Arc::new(StdMutex::new(Some(EgressPolicy {
+		metadata: Some(ResourceMetadata {
+			uid: "policy-1".to_owned(),
+			version: 1,
+		}),
+		rules: vec![protos::ateapi::EgressRule {
+			http: Some(protos::ateapi::HttpRule {
+				hostnames: vec!["localhost".to_owned()],
+				ports: Some(protos::ateapi::Ports {
+					numbers: vec![i32::from(port)],
+					..Default::default()
+				}),
+				effects: None,
+			}),
+			..Default::default()
+		}],
+	})));
+	let api = ateapimock::AteApiMock::new({
+		let policy = policy.clone();
+		move || PolicyContextHandler {
+			policy: policy.clone(),
+		}
+	})
+	.spawn()
+	.await;
+	let seen = Arc::new(StdMutex::new(Vec::new()));
+	let opens = Arc::new(AtomicUsize::new(0));
+	let ext_proc = extprocmock::ExtProcMock::new({
+		let seen = seen.clone();
+		let opens = opens.clone();
+		move || PolicyContextExtProc {
+			seen: seen.clone(),
+			opens: opens.clone(),
+		}
+	})
+	.spawn()
+	.await;
+	let mut outer = simple_bind();
+	outer.key = strng::literal!("outer");
+	outer.address = "127.0.0.1:15013".parse().unwrap();
+	outer.mode = BindMode::Internal;
+	let mut inner = simple_bind();
+	inner.address = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+	inner.mode = BindMode::Internal;
+	let mut gateway = setup_proxy_test("{}")
+		.unwrap()
+		.with_raw_backend(BackendWithPolicies {
+			backend: Backend::Dynamic(ResourceName::new("dynamic".into(), "".into()), None),
+			inline_policies: vec![],
+		})
+		.with_bind(outer)
+		.with_bind(inner)
+		.with_route(basic_named_route("/dynamic".into()))
+		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15013);
+	gateway
+		.attach_frontend_policy(json!({
+			"substrateEgressActorResolution": { "host": api.address.to_string() }
+		}))
+		.await;
+	gateway
+		.attach_route_policy(json!({
+			"substrateEgress": { "host": api.address.to_string() },
+			"extProc": {
+				"host": ext_proc.address.to_string(),
+				"processingOptions": { "responseHeaderMode": "skip", "responseBodyMode": "none" },
+				"metadataContext": {
+					"policy": {
+						"uid": "substrate.egressPolicy.uid",
+						"version": "substrate.egressPolicy.version"
+					}
+				}
+			}
+		}))
+		.await;
+	(gateway, policy, seen, opens, api, ext_proc)
+}
+
+async fn request_policy_context(gateway: &TestBind, port: u16, host: &str) -> StatusCode {
+	let mut io = open_actor_egress_tunnel(gateway, port).await;
+	io.write_all(
+		format!(
+			"GET http://{host}/policy-context HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+		)
+		.as_bytes(),
+	)
+	.await
+	.unwrap();
+	let mut response = Vec::new();
+	tokio::time::timeout(Duration::from_secs(5), io.read_to_end(&mut response))
+		.await
+		.unwrap()
+		.unwrap();
+	let response = String::from_utf8(response).unwrap();
+	let status = response.split_whitespace().nth(1).unwrap().parse().unwrap();
+	assert!(
+		status == StatusCode::OK || status == StatusCode::FORBIDDEN,
+		"{response}"
+	);
+	status
+}
+
+fn assert_policy_context(context: &prost_wkt_types::Struct, uid: &str, version: i64) {
+	use prost_wkt_types::value::Kind;
+	assert!(matches!(
+		context.fields["uid"].kind.as_ref(),
+		Some(Kind::StringValue(value)) if value == uid
+	));
+	assert!(matches!(
+		context.fields["version"].kind.as_ref(),
+		Some(Kind::NumberValue(value)) if *value == version as f64
+	));
+}
+
+#[tokio::test]
+async fn substrate_egress_ext_proc_gets_context_only_for_allowed_requests() {
+	let upstream = simple_mock().await;
+	let port = upstream.address().port();
+	let (gateway, _policy, seen, opens, _api, _ext_proc) = policy_context_gateway(port).await;
+	assert_eq!(
+		request_policy_context(&gateway, port, "localhost").await,
+		StatusCode::OK
+	);
+	assert_eq!(seen.lock().unwrap().len(), 1);
+	assert_eq!(opens.load(Ordering::Relaxed), 1);
+	assert_policy_context(&seen.lock().unwrap()[0], "policy-1", 1);
+	assert_eq!(
+		request_policy_context(&gateway, port, "denied.example").await,
+		StatusCode::FORBIDDEN
+	);
+	assert_eq!(seen.lock().unwrap().len(), 1);
+	assert_eq!(opens.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn substrate_egress_ext_proc_gets_updated_and_recreated_policy_context() {
+	let upstream = simple_mock().await;
+	let port = upstream.address().port();
+	let (gateway, policy, seen, opens, _api, _ext_proc) = policy_context_gateway(port).await;
+	for (index, version) in [1, 2].into_iter().enumerate() {
+		{
+			let mut policy = policy.lock().unwrap();
+			let metadata = policy.as_mut().unwrap().metadata.as_mut().unwrap();
+			metadata.version = version;
+		}
+		assert_eq!(
+			request_policy_context(&gateway, port, "localhost").await,
+			StatusCode::OK
+		);
+		let contexts = seen.lock().unwrap();
+		assert_eq!(contexts.len(), index + 1);
+		assert_policy_context(contexts.last().unwrap(), "policy-1", version);
+	}
+	let mut recreated = policy.lock().unwrap().take().unwrap();
+	assert_eq!(
+		request_policy_context(&gateway, port, "localhost").await,
+		StatusCode::FORBIDDEN
+	);
+	assert_eq!(opens.load(Ordering::Relaxed), 2);
+	recreated.metadata.as_mut().unwrap().uid = "policy-2".to_owned();
+	recreated.metadata.as_mut().unwrap().version = 1;
+	*policy.lock().unwrap() = Some(recreated);
+	assert_eq!(
+		request_policy_context(&gateway, port, "localhost").await,
+		StatusCode::OK
+	);
+	let contexts = seen.lock().unwrap();
+	assert_eq!(contexts.len(), 3);
+	assert_policy_context(contexts.last().unwrap(), "policy-2", 1);
+}
+
 async fn open_actor_egress_tunnel_protocol(
 	gateway: &TestBind,
 	port: u16,
@@ -1889,7 +2132,11 @@ async fn open_actor_egress_tunnel_protocol(
 		assert_ne!(n, 0, "CONNECT closed before responding");
 		response.extend_from_slice(&buf[..n]);
 	}
-	assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK\r\n"));
+	assert!(
+		String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK\r\n"),
+		"{}",
+		String::from_utf8_lossy(&response)
+	);
 	tokio_util::either::Either::Left(io)
 }
 

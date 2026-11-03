@@ -240,6 +240,7 @@ async fn apply_request_policies(
 	req: &mut Request,
 	rp: &mut ResponsePolicies,
 ) -> Result<Option<Arc<retry::Policy>>, ProxyError> {
+	req.extensions_mut().remove::<cel::SubstrateContext>();
 	// TODO we only need allow policies to be timeout-aware because we odn't have
 	// a unified timeout guard that applies during policy evalutation
 	rp.timeout = pol.timeout.select("timeout", req).as_deref().cloned();
