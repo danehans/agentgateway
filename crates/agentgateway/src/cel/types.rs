@@ -52,6 +52,8 @@ pub struct Executor<'a> {
 
 	pub destination: ExtensionOrDirect<'a, DestinationContext>,
 
+	pub substrate: ExtensionOrDirect<'a, SubstrateContext>,
+
 	pub jwt: ExtensionOrDirect<'a, jwt::Claims>,
 
 	#[dynamic(rename = "apiKey")]
@@ -355,6 +357,20 @@ pub struct DestinationContext {
 
 #[apply(schema!)]
 #[derive(cel::DynamicType)]
+#[dynamic(rename_all = "camelCase")]
+pub struct SubstrateContext {
+	pub egress_policy: SubstrateEgressPolicyContext,
+}
+
+#[apply(schema!)]
+#[derive(cel::DynamicType)]
+pub struct SubstrateEgressPolicyContext {
+	pub uid: String,
+	pub version: i64,
+}
+
+#[apply(schema!)]
+#[derive(cel::DynamicType)]
 /// Workload context wrapper. All fields live under `unverified` to make it
 /// clear that the data is resolved by IP, not cryptographically verified.
 pub struct WorkloadContext {
@@ -601,6 +617,7 @@ impl<'a> Executor<'a> {
 		self.proxy = ExtensionOrDirect::Extension(ext);
 		self.source = ExtensionOrDirect::Extension(ext);
 		self.destination = ExtensionOrDirect::Extension(ext);
+		self.substrate = ExtensionOrDirect::Extension(ext);
 	}
 	fn set_request_snapshot(&mut self, req: &'a RequestSnapshot) {
 		self.request = Some(req.into());
@@ -616,6 +633,7 @@ impl<'a> Executor<'a> {
 		self.proxy = ExtensionOrDirect::Direct(req.proxy.as_ref());
 		self.source = ExtensionOrDirect::Direct(req.source.as_ref());
 		self.destination = ExtensionOrDirect::Direct(req.destination.as_ref());
+		self.substrate = ExtensionOrDirect::Direct(req.substrate.as_ref());
 	}
 	fn set_response(&mut self, resp: &'a crate::http::Response) {
 		self.response = Some(resp.into());
@@ -878,6 +896,7 @@ pub fn snapshot_request(req: &mut crate::http::Request, clear: bool) -> RequestS
 		proxy: ext::<ProxyContext>(req, clear),
 		source: ext::<SourceContext>(req, clear),
 		destination: ext::<DestinationContext>(req, clear),
+		substrate: ext::<SubstrateContext>(req, clear),
 		extauthz: ext::<ExtAuthzDynamicMetadata>(req, clear),
 		extproc: ext::<ExtProcDynamicMetadata>(req, clear),
 		mcp_guardrails: ext::<McpGuardrailsDynamicMetadata>(req, clear),
@@ -932,6 +951,8 @@ pub struct RequestSnapshot {
 	pub source: Option<SourceContext>,
 
 	pub destination: Option<DestinationContext>,
+
+	pub substrate: Option<SubstrateContext>,
 
 	pub start_time: Option<RequestTime>,
 
@@ -2317,6 +2338,9 @@ pub struct ExecutorSerde {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub destination: Option<DestinationContext>,
 
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub substrate: Option<SubstrateContext>,
+
 	/// `mcp` contains attributes about the MCP request.
 	/// Request-time CEL includes identity fields (`tool`, `prompt`, `resource`,
 	/// `task`) plus `methodName`. Post-request CEL may also include fields like
@@ -2453,6 +2477,7 @@ impl ExecutorSerde {
 		// Set all the ExtensionOrDirect fields
 		exec.source = ExtensionOrDirect::Direct(self.source.as_ref());
 		exec.destination = ExtensionOrDirect::Direct(self.destination.as_ref());
+		exec.substrate = ExtensionOrDirect::Direct(self.substrate.as_ref());
 		exec.jwt = ExtensionOrDirect::Direct(self.jwt.as_ref());
 		exec.api_key = ExtensionOrDirect::Direct(self.api_key.as_ref());
 		exec.basic_auth = ExtensionOrDirect::Direct(self.basic_auth.as_ref());
@@ -2563,6 +2588,12 @@ pub fn full_example_executor() -> ExecutorSerde {
 			address: "10.0.0.1".parse().unwrap(),
 			port: 8080,
 			hostname: Some("example.com".into()),
+		}),
+		substrate: Some(SubstrateContext {
+			egress_policy: SubstrateEgressPolicyContext {
+				uid: "policy-uid".to_owned(),
+				version: 7,
+			},
 		}),
 		jwt: Some(jwt::Claims {
 			inner: serde_json::Map::from_iter(vec![

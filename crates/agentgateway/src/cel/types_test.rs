@@ -196,6 +196,41 @@ fn test_snapshot_matches_ref() {
 }
 
 #[test]
+fn substrate_egress_policy_fields_are_available_with_cel_types() {
+	let mut req = ::http::Request::new(Body::empty());
+	req.extensions_mut().insert(SubstrateContext {
+		egress_policy: SubstrateEgressPolicyContext {
+			uid: "policy-uid".to_owned(),
+			version: 42,
+		},
+	});
+	let expr = Expression::new_strict(
+		"substrate.egressPolicy.uid == 'policy-uid' && \
+		 type(substrate.egressPolicy.uid) == string && \
+		 substrate.egressPolicy.version == 42 && \
+		 type(substrate.egressPolicy.version) == int",
+	)
+	.unwrap();
+	assert!(Executor::new_request(&req).eval_bool(&expr));
+	let mut context = crate::cel::ContextBuilder::new();
+	context.register_expression(&expr);
+	let snapshot = context.maybe_snapshot_request(&mut req, true).unwrap();
+	assert!(req.extensions().get::<SubstrateContext>().is_none());
+	assert!(Executor::new_request_snapshot(Some(&snapshot)).eval_bool(&expr));
+	assert!(
+		Executor::new_logger(Some(&snapshot), None, None, None, None, None, None).eval_bool(&expr)
+	);
+
+	let absent = Executor::new_empty();
+	let missing = Expression::new_strict("substrate.egressPolicy.uid").unwrap();
+	let other_missing = Expression::new_strict("destination.hostname").unwrap();
+	assert_eq!(
+		absent.eval(&missing).is_err(),
+		absent.eval(&other_missing).is_err()
+	);
+}
+
+#[test]
 fn token_counts_normalize_provider_cache_conventions() {
 	let response = llm::LLMResponse {
 		input_tokens: Some(100),
