@@ -886,6 +886,7 @@ mod tests {
 						worker_assignment: Some(protos::ateapi::WorkerAssignment {
 							worker_pod_ips: self.pod_ips.clone(),
 						}),
+						..Default::default()
 					}),
 					..Default::default()
 				}),

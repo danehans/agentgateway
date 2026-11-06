@@ -1,4 +1,5 @@
 use protos::ateapi::ActorState;
+use serde::Deserialize;
 use tonic::Code;
 use x509_parser::extensions::GeneralName;
 
@@ -15,8 +16,30 @@ use crate::*;
 pub(crate) struct ActorIdentity {
 	pub(crate) atespace: String,
 	pub(crate) actor_name: String,
-	// Supplied by GetActor for logging; the certificate identifies the actor by name.
 	pub(crate) actor_uid: Option<String>,
+}
+
+struct CertificateActorIdentity {
+	actor: ActorRef,
+	uid: String,
+	activation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ActorIdentityExtension {
+	atespace: String,
+	actor_name: String,
+	actor_uid: String,
+	#[serde(default, deserialize_with = "deserialize_activation_id")]
+	activation_id: Option<String>,
+}
+
+fn deserialize_activation_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	String::deserialize(deserializer).map(Some)
 }
 
 /// Validates an actor's identity before accepting a CONNECT tunnel.
@@ -28,7 +51,7 @@ pub struct EgressActorResolution {
 }
 
 impl EgressActorResolution {
-	fn identity(req: &Request) -> Result<ActorRef, ProxyError> {
+	fn identity(req: &Request) -> Result<CertificateActorIdentity, ProxyError> {
 		let certificate = req
 			.extensions()
 			.get::<TLSConnectionInfo>()
@@ -77,9 +100,38 @@ impl EgressActorResolution {
 			.and_then(|path| path.split_once('/'))
 			.filter(|(atespace, name)| valid_resource_name(atespace) && valid_resource_name(name))
 			.ok_or_else(invalid_identity)?;
-		Ok(ActorRef {
-			atespace: atespace.to_owned(),
-			name: name.to_owned(),
+		let mut extensions = certificate
+			.extensions()
+			.iter()
+			.filter(|extension| extension.oid.to_id_string() == "1.3.6.1.4.1.11129.2.12.2");
+		let extension = extensions.next().ok_or_else(|| {
+			ProxyError::SubstrateEgressDenied("missing ActorIdentity extension".to_owned())
+		})?;
+		if extensions.next().is_some() {
+			return Err(ProxyError::SubstrateEgressDenied(
+				"multiple ActorIdentity extensions".to_owned(),
+			));
+		}
+		let identity: ActorIdentityExtension =
+			serde_json::from_slice(extension.value).map_err(|_| {
+				ProxyError::SubstrateEgressDenied("invalid ActorIdentity extension".to_owned())
+			})?;
+		if identity.atespace != atespace
+			|| identity.actor_name != name
+			|| identity.actor_uid.is_empty()
+			|| identity.activation_id.as_deref() == Some("")
+		{
+			return Err(ProxyError::SubstrateEgressDenied(
+				"ActorIdentity extension does not match worker identity".to_owned(),
+			));
+		}
+		Ok(CertificateActorIdentity {
+			actor: ActorRef {
+				atespace: atespace.to_owned(),
+				name: name.to_owned(),
+			},
+			uid: identity.actor_uid,
+			activation_id: identity.activation_id,
 		})
 	}
 
@@ -102,7 +154,7 @@ impl EgressActorResolution {
 	async fn authorize(
 		&self,
 		client: &PolicyClient,
-		actor: &ActorRef,
+		identity: &CertificateActorIdentity,
 	) -> Result<ActorIdentity, ProxyError> {
 		let channel = self
 			.target
@@ -112,8 +164,8 @@ impl EgressActorResolution {
 			Some(TRACE_POLICY_KIND),
 			control.get_actor(protos::ateapi::GetActorRequest {
 				actor: Some(protos::ateapi::ObjectRef {
-					atespace: actor.atespace.clone(),
-					name: actor.name.clone(),
+					atespace: identity.actor.atespace.clone(),
+					name: identity.actor.name.clone(),
 				}),
 			}),
 		)
@@ -131,10 +183,35 @@ impl EgressActorResolution {
 				)));
 			},
 		};
+		let status = current.status.as_ref();
+		if status
+			.and_then(|status| status.quarantine.as_ref())
+			.is_some()
+		{
+			return Err(ProxyError::SubstrateEgressDenied(
+				"actor is quarantined".to_owned(),
+			));
+		}
+		let uid = current
+			.metadata
+			.as_ref()
+			.map(|metadata| metadata.uid.as_str());
+		if uid != Some(identity.uid.as_str()) {
+			return Err(ProxyError::SubstrateEgressDenied(
+				"actor certificate UID does not match current actor".to_owned(),
+			));
+		}
+		if let Some(activation_id) = identity.activation_id.as_deref() {
+			if status.map(|status| status.activation_id.as_str()) != Some(activation_id) {
+				return Err(ProxyError::SubstrateEgressDenied(
+					"actor certificate activation does not match current actor".to_owned(),
+				));
+			}
+		}
 		// RESUMING is persisted with the worker assignment. Booting or restoring
 		// workloads may need egress before their wakeup probe makes them RUNNING.
 		if !matches!(
-			current.status.as_ref().map(|status| status.state()),
+			status.map(|status| status.state()),
 			Some(ActorState::Running | ActorState::Resuming)
 		) {
 			return Err(ProxyError::SubstrateEgressDenied(
@@ -142,12 +219,9 @@ impl EgressActorResolution {
 			));
 		}
 		Ok(ActorIdentity {
-			atespace: actor.atespace.clone(),
-			actor_name: actor.name.clone(),
-			actor_uid: current
-				.metadata
-				.map(|metadata| metadata.uid)
-				.filter(|uid| !uid.is_empty()),
+			atespace: identity.actor.atespace.clone(),
+			actor_name: identity.actor.name.clone(),
+			actor_uid: Some(identity.uid.clone()),
 		})
 	}
 }
@@ -166,6 +240,12 @@ mod tests {
 			.iter()
 			.map(|uri| SanType::URI((*uri).try_into().unwrap()))
 			.collect();
+		params
+			.custom_extensions
+			.push(CustomExtension::from_oid_content(
+				&[1, 3, 6, 1, 4, 1, 11129, 2, 12, 2],
+				br#"{"Atespace":"demo","ActorName":"my-actor","ActorUid":"uid-1"}"#.to_vec(),
+			));
 		request_with_certificate(params)
 	}
 
@@ -186,19 +266,24 @@ mod tests {
 	}
 
 	#[test]
-	fn actor_identity_is_parsed_from_the_worker_uri_without_an_extension() {
-		for (atespace, name) in [
-			("demo", "my-actor"),
-			(
-				"fd6cab8c-17c8-4c9e-8893-28e28aff724b",
-				"045841a7-5dcb-47eb-a76f-6d8460bfe009",
-			),
-		] {
-			let uri = format!("spiffe://substrate-actor.local/worker-for-actor/{atespace}/{name}");
-			let identity = EgressActorResolution::identity(&request_with_identity(&[&uri])).unwrap();
-			assert_eq!(identity.atespace, atespace);
-			assert_eq!(identity.name, name);
-		}
+	fn actor_identity_is_parsed_from_the_verified_certificate() {
+		let uri = "spiffe://substrate-actor.local/worker-for-actor/demo/my-actor";
+		let identity = EgressActorResolution::identity(&request_with_identity(&[uri])).unwrap();
+		assert_eq!(identity.actor.atespace, "demo");
+		assert_eq!(identity.actor.name, "my-actor");
+		assert_eq!(identity.uid, "uid-1");
+		assert_eq!(identity.activation_id, None);
+	}
+
+	#[test]
+	fn actor_identity_requires_the_extension() {
+		let mut params = CertificateParams::default();
+		params.subject_alt_names.push(SanType::URI(
+			"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor"
+				.try_into()
+				.unwrap(),
+		));
+		assert!(EgressActorResolution::identity(&request_with_certificate(params)).is_err());
 	}
 
 	#[test]
