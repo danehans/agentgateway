@@ -1,0 +1,58 @@
+name: Substrate CONNECT CI
+
+on:
+  push:
+    branches:
+      - quarantine-connect-binding
+  pull_request:
+    branches:
+      - substrate-egress-policy-context
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_WARNINGS: deny
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CI: true
+
+jobs:
+  proxy-test:
+    name: Proxy Test (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Rust build cache
+        uses: ./.github/actions/rust-build-cache
+        with:
+          cache-key: substrate-connect-test
+      - name: Start validation dependencies
+        run: tools/manage-validation-deps.sh start
+      - name: Test
+        run: make test
+        env:
+          KEYCLOAK_AVAILABLE: 1
+      - name: Stop validation dependencies
+        if: always()
+        run: tools/manage-validation-deps.sh stop
+
+  proxy-lint:
+    name: Proxy Lint (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Rust build cache
+        uses: ./.github/actions/rust-build-cache
+        with:
+          cache-key: substrate-connect-lint
+      - name: Generation
+        run: make generate-schema check-clean-repo check-default-members
+      - name: Lint
+        run: make lint
