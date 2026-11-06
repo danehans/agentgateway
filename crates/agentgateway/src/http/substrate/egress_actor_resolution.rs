@@ -201,12 +201,12 @@ impl EgressActorResolution {
 				"actor certificate UID does not match current actor".to_owned(),
 			));
 		}
-		if let Some(activation_id) = identity.activation_id.as_deref() {
-			if status.map(|status| status.activation_id.as_str()) != Some(activation_id) {
-				return Err(ProxyError::SubstrateEgressDenied(
-					"actor certificate activation does not match current actor".to_owned(),
-				));
-			}
+		if let Some(activation_id) = identity.activation_id.as_deref()
+			&& status.map(|status| status.activation_id.as_str()) != Some(activation_id)
+		{
+			return Err(ProxyError::SubstrateEgressDenied(
+				"actor certificate activation does not match current actor".to_owned(),
+			));
 		}
 		// RESUMING is persisted with the worker assignment. Booting or restoring
 		// workloads may need egress before their wakeup probe makes them RUNNING.
