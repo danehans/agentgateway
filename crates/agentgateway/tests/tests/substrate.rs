@@ -1926,7 +1926,7 @@ impl ateapimock::Handler for PolicyContextHandler {
 	) -> Result<Actor, tonic::Status> {
 		Ok(Actor {
 			metadata: Some(ResourceMetadata {
-				uid: ACTOR_UID.to_owned(),
+				uid: "uid-1".to_owned(),
 				..Default::default()
 			}),
 			status: Some(ActorStatus {
