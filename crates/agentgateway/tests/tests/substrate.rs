@@ -225,7 +225,6 @@ impl ateapimock::Handler for EgressHandler {
 				} else {
 					vec![]
 				},
-				..Default::default()
 			}),
 		})
 	}
