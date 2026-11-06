@@ -25,6 +25,23 @@ fn substrate_control_api_wire_tags() {
 	let status = actor.status.unwrap();
 	assert_eq!(status.state, ActorState::Running as i32);
 	assert!(status.worker_assignment.is_some());
+	let actor = Actor {
+		metadata: Some(ResourceMetadata {
+			uid: "u".into(),
+			..Default::default()
+		}),
+		status: Some(ActorStatus {
+			state: ActorState::Running as i32,
+			activation_id: "a".into(),
+			holds: vec![protos::ateapi::ActorHold {}],
+			quarantine: Some(protos::ateapi::ActorQuarantine {}),
+			..Default::default()
+		}),
+	};
+	assert_eq!(
+		prost::Message::encode_to_vec(&actor),
+		b"\x0a\x03\x1a\x01u\x2a\x09\x08\x02\x42\x01a\x4a\x00\x52\x00"
+	);
 
 	let request = protos::ateapi::MintActorJwtRequest {
 		actor: Some(protos::ateapi::ObjectRef {
@@ -70,11 +87,14 @@ struct IngressHandler {
 	uid: &'static str,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct EgressHandler {
 	uid: &'static str,
 	state: Option<i32>,
 	error: Option<tonic::Code>,
+	activation_id: &'static str,
+	quarantine: bool,
+	held: bool,
 }
 
 #[derive(Clone)]
@@ -105,6 +125,7 @@ impl ateapimock::Handler for CredentialEgressHandler {
 			status: Some(ActorStatus {
 				state: self.state as i32,
 				worker_assignment: None,
+				..Default::default()
 			}),
 		})
 	}
@@ -195,6 +216,15 @@ impl ateapimock::Handler for EgressHandler {
 			status: self.state.map(|state| ActorStatus {
 				state,
 				worker_assignment: None,
+				activation_id: self.activation_id.to_owned(),
+				quarantine: self
+					.quarantine
+					.then_some(protos::ateapi::ActorQuarantine {}),
+				holds: if self.held {
+					vec![protos::ateapi::ActorHold {}]
+				} else {
+					vec![]
+				},
 			}),
 		})
 	}
@@ -221,6 +251,7 @@ impl ateapimock::Handler for IngressHandler {
 					worker_assignment: Some(protos::ateapi::WorkerAssignment {
 						worker_pod_ips: vec![self.pod_ip.clone()],
 					}),
+					..Default::default()
 				}),
 			}),
 			resumed: self.resumed,
@@ -289,6 +320,7 @@ impl ateapimock::Handler for SelectiveParkingHandler {
 					worker_assignment: Some(protos::ateapi::WorkerAssignment {
 						worker_pod_ips: vec![self.pod_ip.clone()],
 					}),
+					..Default::default()
 				}),
 			}),
 			resumed: self.resumed,
@@ -322,6 +354,7 @@ impl ateapimock::Handler for ParkingHandler {
 					worker_assignment: Some(protos::ateapi::WorkerAssignment {
 						worker_pod_ips: vec![self.pod_ip.clone()],
 					}),
+					..Default::default()
 				}),
 				..Default::default()
 			}),
@@ -1626,10 +1659,34 @@ async fn actor_ingress_uses_backend_tunnel_for_connect() {
 }
 
 fn actor_certificate(uri: &str) -> String {
+	actor_certificate_with_identity(uri, Some("uid-1"), None)
+}
+
+fn actor_certificate_with_identity(
+	uri: &str,
+	uid: Option<&str>,
+	activation_id: Option<&str>,
+) -> String {
 	let mut params = rcgen::CertificateParams::default();
 	params
 		.subject_alt_names
 		.push(rcgen::SanType::URI(uri.try_into().unwrap()));
+	if let Some(uid) = uid {
+		let mut identity = serde_json::json!({
+			"Atespace": "demo",
+			"ActorName": "my-actor",
+			"ActorUid": uid,
+		});
+		if let Some(activation_id) = activation_id {
+			identity["ActivationId"] = activation_id.into();
+		}
+		params
+			.custom_extensions
+			.push(rcgen::CustomExtension::from_oid_content(
+				&[1, 3, 6, 1, 4, 1, 11129, 2, 12, 2],
+				serde_json::to_vec(&identity).unwrap(),
+			));
+	}
 	params
 		.self_signed(&rcgen::KeyPair::generate().unwrap())
 		.unwrap()
@@ -1652,7 +1709,22 @@ async fn substrate_egress_connect_status_at(
 	certificate_uri: &str,
 	payload: &[u8],
 ) -> StatusCode {
-	let upstream = simple_mock().await;
+	substrate_egress_connect_status_at_certificate(
+		api_address,
+		actor_certificate(certificate_uri),
+		payload,
+	)
+	.await
+}
+
+async fn substrate_egress_connect_status_at_certificate(
+	api_address: std::net::SocketAddr,
+	certificate: String,
+	payload: &[u8],
+) -> StatusCode {
+	let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+	upstream.set_nonblocking(true).unwrap();
+	let upstream_address = upstream.local_addr().unwrap();
 
 	let mut outer = simple_bind();
 	outer.key = strng::literal!("outer");
@@ -1662,10 +1734,10 @@ async fn substrate_egress_connect_status_at(
 	inner.mode = BindMode::Internal;
 	let mut gateway = setup_proxy_test("{}")
 		.unwrap()
-		.with_backend(*upstream.address())
+		.with_backend(upstream_address)
 		.with_bind(outer)
 		.with_bind(inner)
-		.with_route(basic_route(*upstream.address()))
+		.with_route(basic_route(upstream_address))
 		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15012);
 	gateway
 		.attach_frontend_policy(json!({
@@ -1679,7 +1751,7 @@ async fn substrate_egress_connect_status_at(
 		strng::literal!("outer"),
 		Some(TLSConnectionInfo {
 			src_identity: Some(TlsInfo {
-				certificate: Some(actor_certificate(certificate_uri).into()),
+				certificate: Some(certificate.into()),
 				..Default::default()
 			}),
 			..Default::default()
@@ -1703,6 +1775,7 @@ async fn substrate_egress_connect_status_at(
 		io.write_all(payload).await.unwrap();
 		StatusCode::OK
 	} else if response.starts_with("HTTP/1.1 403 Forbidden\r\n") {
+		assert!(upstream.accept().is_err(), "denied CONNECT dialed upstream");
 		StatusCode::FORBIDDEN
 	} else if response.starts_with("HTTP/1.1 503 Service Unavailable\r\n") {
 		StatusCode::SERVICE_UNAVAILABLE
@@ -1733,6 +1806,7 @@ async fn substrate_egress_actor_resolution_refreshes_on_long_lived_tunnel() {
 				status: Some(ActorStatus {
 					state: ActorState::Running as i32,
 					worker_assignment: None,
+					..Default::default()
 				}),
 			})
 		}
@@ -1851,12 +1925,13 @@ impl ateapimock::Handler for PolicyContextHandler {
 	) -> Result<Actor, tonic::Status> {
 		Ok(Actor {
 			metadata: Some(ResourceMetadata {
-				uid: ACTOR_UID.to_owned(),
+				uid: "uid-1".to_owned(),
 				..Default::default()
 			}),
 			status: Some(ActorStatus {
 				state: ActorState::Running as i32,
 				worker_assignment: None,
+				..Default::default()
 			}),
 		})
 	}
@@ -3523,7 +3598,8 @@ async fn substrate_egress_rejects_invalid_or_unavailable_actors_at_connect_time(
 			EgressHandler {
 				uid: "uid-1",
 				state: running,
-				error: Some(tonic::Code::NotFound)
+				error: Some(tonic::Code::NotFound),
+				..Default::default()
 			},
 			"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
 			b"",
@@ -3540,7 +3616,8 @@ async fn substrate_egress_rejects_invalid_or_unavailable_actors_at_connect_time(
 				EgressHandler {
 					uid: "uid-1",
 					state: running,
-					error: None
+					error: None,
+					..Default::default()
 				},
 				uri,
 				b"",
@@ -3555,7 +3632,8 @@ async fn substrate_egress_rejects_invalid_or_unavailable_actors_at_connect_time(
 			EgressHandler {
 				uid: "uid-1",
 				state: running,
-				error: Some(tonic::Code::Unavailable)
+				error: Some(tonic::Code::Unavailable),
+				..Default::default()
 			},
 			"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
 			b"",
@@ -3563,6 +3641,125 @@ async fn substrate_egress_rejects_invalid_or_unavailable_actors_at_connect_time(
 		.await,
 		StatusCode::SERVICE_UNAVAILABLE,
 	);
+}
+
+#[tokio::test]
+async fn substrate_egress_binds_connect_to_current_actor_and_activation() {
+	let uri = "spiffe://substrate-actor.local/worker-for-actor/demo/my-actor";
+	let cases = [
+		(
+			"quarantined running",
+			"uid-1",
+			"run-1",
+			true,
+			false,
+			Some("uid-1"),
+			Some("run-1"),
+			StatusCode::FORBIDDEN,
+		),
+		(
+			"quarantined resuming",
+			"uid-1",
+			"run-1",
+			true,
+			false,
+			Some("uid-1"),
+			Some("run-1"),
+			StatusCode::FORBIDDEN,
+		),
+		(
+			"replacement actor",
+			"uid-2",
+			"run-1",
+			false,
+			false,
+			Some("uid-1"),
+			Some("run-1"),
+			StatusCode::FORBIDDEN,
+		),
+		(
+			"earlier activation",
+			"uid-1",
+			"run-2",
+			false,
+			false,
+			Some("uid-1"),
+			Some("run-1"),
+			StatusCode::FORBIDDEN,
+		),
+		(
+			"missing extension",
+			"uid-1",
+			"run-1",
+			false,
+			false,
+			None,
+			None,
+			StatusCode::FORBIDDEN,
+		),
+		(
+			"current activation",
+			"uid-1",
+			"run-1",
+			false,
+			false,
+			Some("uid-1"),
+			Some("run-1"),
+			StatusCode::OK,
+		),
+		(
+			"held actor",
+			"uid-1",
+			"run-1",
+			false,
+			true,
+			Some("uid-1"),
+			Some("run-1"),
+			StatusCode::OK,
+		),
+		(
+			"base certificate",
+			"uid-1",
+			"run-1",
+			false,
+			false,
+			Some("uid-1"),
+			None,
+			StatusCode::OK,
+		),
+	];
+	for (
+		name,
+		uid,
+		activation_id,
+		quarantine,
+		held,
+		certificate_uid,
+		certificate_activation,
+		expected,
+	) in cases
+	{
+		let api = ateapimock::AteApiMock::new(move || EgressHandler {
+			uid,
+			state: Some(if name == "quarantined resuming" {
+				ActorState::Resuming
+			} else {
+				ActorState::Running
+			} as i32),
+			activation_id,
+			quarantine,
+			held,
+			..Default::default()
+		})
+		.spawn()
+		.await;
+		let certificate = actor_certificate_with_identity(uri, certificate_uid, certificate_activation);
+		assert_eq!(
+			substrate_egress_connect_status_at_certificate(api.address, certificate, b"").await,
+			expected,
+			"{name}"
+		);
+	}
 }
 
 #[tokio::test]
@@ -3599,6 +3796,7 @@ async fn substrate_egress_rejects_actor_states_without_worker_placement(
 				uid: "uid-1",
 				state,
 				error: None,
+				..Default::default()
 			},
 			"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
 			b"",
@@ -3625,7 +3823,8 @@ async fn substrate_egress_accepts_valid_actor_connect_before_protocol_detection(
 				EgressHandler {
 					uid: "uid-1",
 					state: Some(state as i32),
-					error: None
+					error: None,
+					..Default::default()
 				},
 				"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
 				payload,
