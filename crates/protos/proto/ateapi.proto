@@ -19,7 +19,13 @@ message Actor {
 message ActorStatus {
   ActorState state = 1;
   WorkerAssignment worker_assignment = 2;
+  string activation_id = 8;
+  ActorQuarantine quarantine = 10;
 }
+
+// Only presence is needed for CONNECT authorization. These messages retain
+// their wire tags while their contents remain opaque to agentgateway.
+message ActorQuarantine {}
 
 enum ActorState {
   ACTOR_STATE_UNSPECIFIED = 0;
