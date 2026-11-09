@@ -216,12 +216,6 @@ impl EgressActorResolution {
 			},
 		};
 		let status = current.status.as_ref();
-		if status
-			.and_then(|status| status.quarantine.as_ref())
-			.is_some()
-		{
-			return Err(connect_refusal(identity, authority, ACTOR_QUARANTINED));
-		}
 		let uid = current
 			.metadata
 			.as_ref()
@@ -233,6 +227,12 @@ impl EgressActorResolution {
 			&& status.map(|status| status.activation_id.as_str()) != Some(activation_id)
 		{
 			return Err(connect_refusal(identity, authority, ACTIVATION_MISMATCH));
+		}
+		if status
+			.and_then(|status| status.quarantine.as_ref())
+			.is_some()
+		{
+			return Err(connect_refusal(identity, authority, ACTOR_QUARANTINED));
 		}
 		// RESUMING is persisted with the worker assignment. Booting or restoring
 		// workloads may need egress before their wakeup probe makes them RUNNING.
