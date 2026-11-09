@@ -8,6 +8,17 @@ API backend handles both `GetActor` (before returning 200 to CONNECT) and
 `GetActorEgressPolicy` (when the inner TLS ClientHello arrives). Actor traffic is
 classified from its first bytes, independently of the destination port.
 
+A refused CONNECT returns 403 with one fixed response-body token:
+`actor-uid-mismatch` when the verified certificate names a different actor UID,
+`activation-mismatch` when its activation differs, or `actor-quarantined` when
+the certified identity matches and `GetActor` reports quarantine. These codes
+are available
+without exposing internal errors. The UID and activation checks also work when
+the actor API does not report quarantine. Other refusals retain their generic
+response. Enable the `agentgateway::substrate::connect_refusal` log target at
+`warn` to record the code, certified actor identity and CONNECT authority without
+enabling request logs.
+
 Set `protocol: AUTO` on the internal destination bind and supply these protocol
 handlers:
 

@@ -1722,6 +1722,16 @@ async fn substrate_egress_connect_status_at_certificate(
 	certificate: String,
 	payload: &[u8],
 ) -> StatusCode {
+	substrate_egress_connect_response_at_certificate(api_address, certificate, payload)
+		.await
+		.0
+}
+
+async fn substrate_egress_connect_response_at_certificate(
+	api_address: std::net::SocketAddr,
+	certificate: String,
+	payload: &[u8],
+) -> (StatusCode, String) {
 	let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 	upstream.set_nonblocking(true).unwrap();
 	let upstream_address = upstream.local_addr().unwrap();
@@ -1770,17 +1780,43 @@ async fn substrate_egress_connect_status_at_certificate(
 			break;
 		}
 	}
-	let response = String::from_utf8(response).unwrap();
-	if response.starts_with("HTTP/1.1 200 OK\r\n") {
+	if response.starts_with(b"HTTP/1.1 200 OK\r\n") {
 		io.write_all(payload).await.unwrap();
-		StatusCode::OK
-	} else if response.starts_with("HTTP/1.1 403 Forbidden\r\n") {
+		(StatusCode::OK, String::from_utf8(response).unwrap())
+	} else if response.starts_with(b"HTTP/1.1 403 Forbidden\r\n") {
 		assert!(upstream.accept().is_err(), "denied CONNECT dialed upstream");
-		StatusCode::FORBIDDEN
-	} else if response.starts_with("HTTP/1.1 503 Service Unavailable\r\n") {
-		StatusCode::SERVICE_UNAVAILABLE
+		let body_start = response
+			.windows(4)
+			.position(|window| window == b"\r\n\r\n")
+			.unwrap()
+			+ 4;
+		let headers = String::from_utf8_lossy(&response[..body_start]);
+		let body_length: usize = headers
+			.lines()
+			.find_map(|line| {
+				line
+					.to_ascii_lowercase()
+					.strip_prefix("content-length:")
+					.map(|value| value.trim().parse().unwrap())
+			})
+			.unwrap();
+		while response.len() - body_start < body_length {
+			let mut chunk = [0; 1024];
+			let n = io.read(&mut chunk).await.unwrap();
+			assert!(n > 0, "CONNECT body unexpectedly closed");
+			response.extend_from_slice(&chunk[..n]);
+		}
+		(StatusCode::FORBIDDEN, String::from_utf8(response).unwrap())
+	} else if response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n") {
+		(
+			StatusCode::SERVICE_UNAVAILABLE,
+			String::from_utf8(response).unwrap(),
+		)
 	} else {
-		panic!("unexpected CONNECT response: {response}")
+		panic!(
+			"unexpected CONNECT response: {}",
+			String::from_utf8_lossy(&response)
+		)
 	}
 }
 
@@ -3754,12 +3790,122 @@ async fn substrate_egress_binds_connect_to_current_actor_and_activation() {
 		.spawn()
 		.await;
 		let certificate = actor_certificate_with_identity(uri, certificate_uid, certificate_activation);
-		assert_eq!(
-			substrate_egress_connect_status_at_certificate(api.address, certificate, b"").await,
-			expected,
-			"{name}"
-		);
+		let (status, response) =
+			substrate_egress_connect_response_at_certificate(api.address, certificate, b"").await;
+		assert_eq!(status, expected, "{name}");
+		if expected == StatusCode::OK {
+			for reason in [
+				"actor-quarantined",
+				"actor-uid-mismatch",
+				"activation-mismatch",
+			] {
+				assert!(!response.contains(reason), "{name} leaked {reason}");
+			}
+		}
 	}
+}
+
+#[rstest::rstest]
+#[case::quarantine(true, "uid-1", "run-1", "actor-quarantined")]
+#[case::replacement(false, "uid-2", "run-1", "actor-uid-mismatch")]
+#[case::earlier_activation(false, "uid-1", "run-2", "activation-mismatch")]
+#[case::quarantined_replacement(true, "uid-2", "run-2", "actor-uid-mismatch")]
+#[case::quarantined_earlier_activation(true, "uid-1", "run-2", "activation-mismatch")]
+#[tokio::test]
+async fn substrate_egress_connect_refusal_has_a_stable_reason(
+	#[case] quarantine: bool,
+	#[case] uid: &'static str,
+	#[case] activation: &'static str,
+	#[case] reason: &str,
+) {
+	let uri = "spiffe://substrate-actor.local/worker-for-actor/demo/my-actor";
+	let api = ateapimock::AteApiMock::new(move || EgressHandler {
+		uid,
+		state: Some(ActorState::Running as i32),
+		activation_id: activation,
+		quarantine,
+		..Default::default()
+	})
+	.spawn()
+	.await;
+	let certificate = actor_certificate_with_identity(uri, Some("uid-1"), Some("run-1"));
+	let (status, response) =
+		substrate_egress_connect_response_at_certificate(api.address, certificate, b"").await;
+	assert_eq!(status, StatusCode::FORBIDDEN);
+	let body = response.split_once("\r\n\r\n").unwrap().1;
+	assert_eq!(body, reason);
+}
+
+#[tokio::test]
+async fn substrate_egress_connect_without_authority_is_bad_request() {
+	let api = ateapimock::AteApiMock::new(|| EgressHandler {
+		uid: "uid-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	})
+	.spawn()
+	.await;
+	let mut outer = simple_bind();
+	outer.key = strng::literal!("outer");
+	outer.address = "127.0.0.1:15012".parse().unwrap();
+	let mut inner = simple_bind();
+	inner.address = "0.0.0.0:18080".parse().unwrap();
+	inner.mode = BindMode::Internal;
+	let mut gateway = setup_proxy_test("{}")
+		.unwrap()
+		.with_bind(outer)
+		.with_bind(inner)
+		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15012);
+	gateway
+		.attach_frontend_policy(json!({
+			"substrateEgressActorResolution": { "host": api.address.to_string() }
+		}))
+		.await;
+	let certificate =
+		actor_certificate("spiffe://substrate-actor.local/worker-for-actor/demo/my-actor");
+	let tls = || TLSConnectionInfo {
+		src_identity: Some(TlsInfo {
+			certificate: Some(certificate.clone().into()),
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	let mut http1 = gateway.serve_tunnel_with_tls_info(strng::literal!("outer"), Some(tls()));
+	http1
+		.write_all(b"CONNECT /x HTTP/1.1\r\nHost: allowed.example:18080\r\n\r\n")
+		.await
+		.unwrap();
+	let mut response = [0; 256];
+	let n = tokio::time::timeout(Duration::from_secs(5), http1.read(&mut response))
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 400 Bad Request\r\n"));
+
+	let http2 = gateway.serve_tunnel_with_tls_info(strng::literal!("outer"), Some(tls()));
+	let (mut client, connection) = h2::client::handshake(http2).await.unwrap();
+	let connection = tokio::spawn(connection);
+	let request = ::http::Request::builder()
+		.method(Method::CONNECT)
+		.uri("/x")
+		.version(Version::HTTP_11)
+		.body(())
+		.unwrap();
+	match client.send_request(request, true) {
+		Ok((response, _)) => match response.await {
+			Ok(response) => assert_eq!(response.status(), StatusCode::BAD_REQUEST),
+			Err(error) => assert!(
+				error.is_remote() && error.reason() == Some(h2::Reason::PROTOCOL_ERROR),
+				"unexpected HTTP/2 error: {error}"
+			),
+		},
+		Err(error) => assert!(
+			error.is_library() && error.reason() == Some(h2::Reason::PROTOCOL_ERROR),
+			"unexpected HTTP/2 error: {error}"
+		),
+	}
+	connection.abort();
 }
 
 #[tokio::test]

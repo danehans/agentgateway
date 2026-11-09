@@ -25,6 +25,28 @@ struct CertificateActorIdentity {
 	activation_id: Option<String>,
 }
 
+const ACTOR_QUARANTINED: &str = "actor-quarantined";
+const ACTOR_UID_MISMATCH: &str = "actor-uid-mismatch";
+const ACTIVATION_MISMATCH: &str = "activation-mismatch";
+
+fn connect_refusal(
+	identity: &CertificateActorIdentity,
+	authority: &str,
+	reason: &'static str,
+) -> ProxyError {
+	warn!(
+		target: "agentgateway::substrate::connect_refusal",
+		reason_code = reason,
+		actor_atespace = %identity.actor.atespace,
+		actor_name = %identity.actor.name,
+		actor_uid = %identity.uid,
+		activation_id = identity.activation_id.as_deref().unwrap_or(""),
+		connect_authority = authority,
+		"Substrate CONNECT refused"
+	);
+	ProxyError::SubstrateEgressConnectDenied(reason)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ActorIdentityExtension {
@@ -146,8 +168,17 @@ impl EgressActorResolution {
 			.expect("tcp connection must be set");
 		connection.copy::<TLSConnectionInfo>(req.extensions_mut());
 		let actor = Self::identity(req)?;
+		let authority = req
+			.uri()
+			.authority()
+			.expect("CONNECT authority must be set")
+			.as_str();
 		self
-			.authorize(&PolicyClient::new(inputs.clone()).with_parent(req), &actor)
+			.authorize(
+				&PolicyClient::new(inputs.clone()).with_parent(req),
+				&actor,
+				authority,
+			)
 			.await
 	}
 
@@ -155,6 +186,7 @@ impl EgressActorResolution {
 		&self,
 		client: &PolicyClient,
 		identity: &CertificateActorIdentity,
+		authority: &str,
 	) -> Result<ActorIdentity, ProxyError> {
 		let channel = self
 			.target
@@ -184,29 +216,23 @@ impl EgressActorResolution {
 			},
 		};
 		let status = current.status.as_ref();
-		if status
-			.and_then(|status| status.quarantine.as_ref())
-			.is_some()
-		{
-			return Err(ProxyError::SubstrateEgressDenied(
-				"actor is quarantined".to_owned(),
-			));
-		}
 		let uid = current
 			.metadata
 			.as_ref()
 			.map(|metadata| metadata.uid.as_str());
 		if uid != Some(identity.uid.as_str()) {
-			return Err(ProxyError::SubstrateEgressDenied(
-				"actor certificate UID does not match current actor".to_owned(),
-			));
+			return Err(connect_refusal(identity, authority, ACTOR_UID_MISMATCH));
 		}
 		if let Some(activation_id) = identity.activation_id.as_deref()
 			&& status.map(|status| status.activation_id.as_str()) != Some(activation_id)
 		{
-			return Err(ProxyError::SubstrateEgressDenied(
-				"actor certificate activation does not match current actor".to_owned(),
-			));
+			return Err(connect_refusal(identity, authority, ACTIVATION_MISMATCH));
+		}
+		if status
+			.and_then(|status| status.quarantine.as_ref())
+			.is_some()
+		{
+			return Err(connect_refusal(identity, authority, ACTOR_QUARANTINED));
 		}
 		// RESUMING is persisted with the worker assignment. Booting or restoring
 		// workloads may need egress before their wakeup probe makes them RUNNING.
@@ -228,11 +254,81 @@ impl EgressActorResolution {
 
 #[cfg(test)]
 mod tests {
+	use std::io::Write;
+	use std::sync::Mutex;
+
 	use rcgen::{CertificateParams, CustomExtension, KeyPair, SanType};
 
 	use super::*;
 	use crate::http::Body;
 	use crate::transport::tls::TlsInfo;
+
+	#[test]
+	fn connect_refusal_logs_only_identity_and_authority() {
+		#[derive(Clone)]
+		struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+		impl Write for LogWriter {
+			fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+				self.0.lock().unwrap().extend_from_slice(bytes);
+				Ok(bytes.len())
+			}
+
+			fn flush(&mut self) -> std::io::Result<()> {
+				Ok(())
+			}
+		}
+
+		let logs = Arc::new(Mutex::new(Vec::new()));
+		let writer = LogWriter(logs.clone());
+		let subscriber = tracing_subscriber::fmt()
+			.json()
+			.with_env_filter("off,agentgateway::substrate::connect_refusal=warn")
+			.with_writer(move || writer.clone())
+			.finish();
+		let identity = CertificateActorIdentity {
+			actor: ActorRef {
+				atespace: "demo".into(),
+				name: "my-actor".into(),
+			},
+			uid: "uid-1".into(),
+			activation_id: Some("run-1".into()),
+		};
+		tracing::subscriber::with_default(subscriber, || {
+			for reason in [ACTOR_QUARANTINED, ACTOR_UID_MISMATCH, ACTIVATION_MISMATCH] {
+				assert!(
+					matches!(connect_refusal(&identity, "192.0.2.10:443", reason), ProxyError::SubstrateEgressConnectDenied(code) if code == reason)
+				);
+			}
+		});
+		let bytes = logs.lock().unwrap();
+		let lines = String::from_utf8_lossy(&bytes);
+		let events: Vec<serde_json::Value> = lines
+			.lines()
+			.map(|line| serde_json::from_str(line).unwrap())
+			.collect();
+		assert_eq!(events.len(), 3);
+		for (event, reason) in
+			events
+				.iter()
+				.zip([ACTOR_QUARANTINED, ACTOR_UID_MISMATCH, ACTIVATION_MISMATCH])
+		{
+			assert_eq!(event["target"], "agentgateway::substrate::connect_refusal");
+			assert_eq!(event["fields"]["reason_code"], reason);
+			assert_eq!(event["fields"]["actor_atespace"], "demo");
+			assert_eq!(event["fields"]["actor_name"], "my-actor");
+			assert_eq!(event["fields"]["actor_uid"], "uid-1");
+			assert_eq!(event["fields"]["activation_id"], "run-1");
+			assert_eq!(event["fields"]["connect_authority"], "192.0.2.10:443");
+			assert!(
+				!event["fields"]
+					.as_object()
+					.unwrap()
+					.keys()
+					.any(|key| key.contains("header") || key.contains("path") || key.contains("body"))
+			);
+		}
+	}
 
 	fn request_with_identity(uris: &[&str]) -> Request {
 		let mut params = CertificateParams::default();
