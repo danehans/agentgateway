@@ -926,6 +926,7 @@ pub struct ProxyInputs {
 	pub ca: Option<Arc<CaClient>>,
 	pub spiffe: Option<Arc<control::spiffe::SpiffeClient>>,
 	pub admission: Arc<proxy::admission::AdmissionRegistry>,
+	pub(crate) substrate_revocations: http::substrate::revocation::Registry,
 }
 
 impl ProxyInputs {
@@ -957,6 +958,7 @@ impl ProxyInputs {
 			ca,
 			spiffe,
 			admission: Default::default(),
+			substrate_revocations: Default::default(),
 		}
 	}
 }
