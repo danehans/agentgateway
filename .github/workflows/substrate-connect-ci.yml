@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - substrate-egress-policy-context
+      - danehans/v1.0.0-rc1-gateway
 
 permissions:
   contents: read
