@@ -86,3 +86,28 @@ Exact names rank ahead of single-label wildcards, then `*`; explicit ports rank
 ahead of all ports. Omitted HTTP/HTTPS ports default to 80/443. Passthrough requires
 ports. `replace_headers` resolves credentials only for headers already present
 in the actor's request, replacing any placeholder value.
+
+For certificates carrying an activation ID, the fork gateway retains a
+continuing authorization check while CONNECT tunnels are live. Each replica
+shares one authenticated `GetActor` poll per certified execution and control API
+backend across all its tunnels. The first check is jittered within 4–5 seconds;
+subsequent checks are at most 5 seconds apart, with 64 concurrent lookups and a
+2-second deadline including capacity waits. Quarantine, changed UID or
+activation, deletion, failed checks and overdue scheduling close the original
+execution's tunnels. Ordinary holder-scoped holds do not revoke. A fresh CONNECT
+after release is authorized independently; old handles cannot reopen.
+
+Closure requests the existing HTTP graceful drain (best-effort HTTP/2 GOAWAY),
+cancels HTTP/2 request tasks, and hard-aborts within a 1-second local close
+budget. TCP passthrough copies are cancelled directly without worker teardown. Enable
+`agentgateway::substrate::connect_revocation` at `warn` for certified identity,
+authority and the CONNECT mismatch/quarantine codes or
+`actor-check-failed`/`actor-check-overdue`. The
+`substrate_revocation_*` metrics expose active executions and tunnels, lookups,
+failed and overdue checks, and closed tunnels without actor labels.
+Native policy and gateway authentication still apply. An API outage can close
+otherwise permitted traffic. Legacy certificates without activation retain
+CONNECT admission behavior but have no continuing exact-execution revocation
+guarantee. Gateway closure does not cancel work already accepted upstream.
+The 8-second design budget (5-second interval, 2-second RPC, 1-second close)
+is not a qualified deployment-wide latency guarantee.

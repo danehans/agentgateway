@@ -337,6 +337,12 @@ pub struct Metrics {
 
 	// Number of requests currently waiting for a Substrate actor to become routable.
 	pub substrate_request_parking_active: Gauge,
+	pub substrate_revocation_actors_active: Gauge,
+	pub substrate_revocation_tunnels_active: Gauge,
+	pub substrate_revocation_lookups: counter::Counter,
+	pub substrate_revocation_failed_checks: counter::Counter,
+	pub substrate_revocation_overdue_checks: counter::Counter,
+	pub substrate_revocation_closed_tunnels: counter::Counter,
 }
 
 // FilteredRegistry is a wrapper around Registry that allows to filter out certain metrics.
@@ -465,6 +471,60 @@ impl Metrics {
 		);
 
 		Metrics {
+			substrate_revocation_actors_active: {
+				let m = Gauge::default();
+				registry.register(
+					"substrate_revocation_actors_active",
+					"Certified executions with live revocable tunnels",
+					m.clone(),
+				);
+				m
+			},
+			substrate_revocation_tunnels_active: {
+				let m = Gauge::default();
+				registry.register(
+					"substrate_revocation_tunnels_active",
+					"Live revocable CONNECT tunnels",
+					m.clone(),
+				);
+				m
+			},
+			substrate_revocation_lookups: {
+				let m = counter::Counter::default();
+				registry.register(
+					"substrate_revocation_lookups",
+					"Continuing actor authorization lookups",
+					m.clone(),
+				);
+				m
+			},
+			substrate_revocation_failed_checks: {
+				let m = counter::Counter::default();
+				registry.register(
+					"substrate_revocation_failed_checks",
+					"Failed continuing actor authorization checks",
+					m.clone(),
+				);
+				m
+			},
+			substrate_revocation_overdue_checks: {
+				let m = counter::Counter::default();
+				registry.register(
+					"substrate_revocation_overdue_checks",
+					"Overdue continuing actor authorization checks",
+					m.clone(),
+				);
+				m
+			},
+			substrate_revocation_closed_tunnels: {
+				let m = counter::Counter::default();
+				registry.register(
+					"substrate_revocation_closed_tunnels",
+					"CONNECT tunnels closed by continuing authorization",
+					m.clone(),
+				);
+				m
+			},
 			substrate_request_parking_active: {
 				let m = Gauge::default();
 				registry.register(

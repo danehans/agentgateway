@@ -1066,6 +1066,7 @@ mod tests {
 			spiffe: None,
 			mcp_state: crate::mcp::App::new(stores, encoder),
 			admission: Default::default(),
+			substrate_revocations: Default::default(),
 		})
 	}
 
