@@ -59,5 +59,11 @@
 | `agentgateway_build_info` | Info | — | Agentgateway build information. |
 | `agentgateway_config_synchronized` | Gauge | — | Whether the last configuration load/reload was successful or not, being synchronized with the on-disk configuration. |
 | `agentgateway_substrate_request_parking_active` | Gauge | — | Number of requests waiting for a Substrate actor to become routable. |
+| `agentgateway_substrate_revocation_actors_active` | Gauge | — | Certified executions with live revocable tunnels. |
+| `agentgateway_substrate_revocation_closed_tunnels_total` | Counter | — | CONNECT tunnels closed by continuing authorization. |
+| `agentgateway_substrate_revocation_failed_checks_total` | Counter | — | Failed continuing actor authorization checks. |
+| `agentgateway_substrate_revocation_lookups_total` | Counter | — | Continuing actor authorization lookups. |
+| `agentgateway_substrate_revocation_overdue_checks_total` | Counter | — | Overdue continuing actor authorization checks. |
+| `agentgateway_substrate_revocation_tunnels_active` | Gauge | — | Live revocable CONNECT tunnels. |
 | `agentgateway_upstream_call_duration_seconds` | Histogram | seconds | Duration of outbound calls made by agentgateway (seconds). |
 | `agentgateway_upstream_connections_active` | Gauge | — | Number of currently open upstream connections. |
