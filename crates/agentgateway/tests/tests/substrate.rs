@@ -3790,11 +3790,18 @@ async fn substrate_egress_binds_connect_to_current_actor_and_activation() {
 		.spawn()
 		.await;
 		let certificate = actor_certificate_with_identity(uri, certificate_uid, certificate_activation);
-		assert_eq!(
-			substrate_egress_connect_status_at_certificate(api.address, certificate, b"").await,
-			expected,
-			"{name}"
-		);
+		let (status, response) =
+			substrate_egress_connect_response_at_certificate(api.address, certificate, b"").await;
+		assert_eq!(status, expected, "{name}");
+		if expected == StatusCode::OK {
+			for reason in [
+				"actor-quarantined",
+				"actor-uid-mismatch",
+				"activation-mismatch",
+			] {
+				assert!(!response.contains(reason), "{name} leaked {reason}");
+			}
+		}
 	}
 }
 
