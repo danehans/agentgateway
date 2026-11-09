@@ -1716,6 +1716,16 @@ async fn substrate_egress_connect_status_at_certificate(
 	certificate: String,
 	payload: &[u8],
 ) -> StatusCode {
+	substrate_egress_connect_response_at_certificate(api_address, certificate, payload)
+		.await
+		.0
+}
+
+async fn substrate_egress_connect_response_at_certificate(
+	api_address: std::net::SocketAddr,
+	certificate: String,
+	payload: &[u8],
+) -> (StatusCode, String) {
 	let upstream = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 	upstream.set_nonblocking(true).unwrap();
 	let upstream_address = upstream.local_addr().unwrap();
@@ -1764,17 +1774,43 @@ async fn substrate_egress_connect_status_at_certificate(
 			break;
 		}
 	}
-	let response = String::from_utf8(response).unwrap();
-	if response.starts_with("HTTP/1.1 200 OK\r\n") {
+	if response.starts_with(b"HTTP/1.1 200 OK\r\n") {
 		io.write_all(payload).await.unwrap();
-		StatusCode::OK
-	} else if response.starts_with("HTTP/1.1 403 Forbidden\r\n") {
+		(StatusCode::OK, String::from_utf8(response).unwrap())
+	} else if response.starts_with(b"HTTP/1.1 403 Forbidden\r\n") {
 		assert!(upstream.accept().is_err(), "denied CONNECT dialed upstream");
-		StatusCode::FORBIDDEN
-	} else if response.starts_with("HTTP/1.1 503 Service Unavailable\r\n") {
-		StatusCode::SERVICE_UNAVAILABLE
+		let body_start = response
+			.windows(4)
+			.position(|window| window == b"\r\n\r\n")
+			.unwrap()
+			+ 4;
+		let headers = String::from_utf8_lossy(&response[..body_start]);
+		let body_length: usize = headers
+			.lines()
+			.find_map(|line| {
+				line
+					.to_ascii_lowercase()
+					.strip_prefix("content-length:")
+					.map(|value| value.trim().parse().unwrap())
+			})
+			.unwrap();
+		while response.len() - body_start < body_length {
+			let mut chunk = [0; 1024];
+			let n = io.read(&mut chunk).await.unwrap();
+			assert!(n > 0, "CONNECT body unexpectedly closed");
+			response.extend_from_slice(&chunk[..n]);
+		}
+		(StatusCode::FORBIDDEN, String::from_utf8(response).unwrap())
+	} else if response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n") {
+		(
+			StatusCode::SERVICE_UNAVAILABLE,
+			String::from_utf8(response).unwrap(),
+		)
 	} else {
-		panic!("unexpected CONNECT response: {response}")
+		panic!(
+			"unexpected CONNECT response: {}",
+			String::from_utf8_lossy(&response)
+		)
 	}
 }
 
@@ -3474,12 +3510,50 @@ async fn substrate_egress_binds_connect_to_current_actor_and_activation() {
 		.spawn()
 		.await;
 		let certificate = actor_certificate_with_identity(uri, certificate_uid, certificate_activation);
-		assert_eq!(
-			substrate_egress_connect_status_at_certificate(api.address, certificate, b"").await,
-			expected,
-			"{name}"
-		);
+		let (status, response) =
+			substrate_egress_connect_response_at_certificate(api.address, certificate, b"").await;
+		assert_eq!(status, expected, "{name}");
+		if expected == StatusCode::OK {
+			for reason in [
+				"actor-quarantined",
+				"actor-uid-mismatch",
+				"activation-mismatch",
+			] {
+				assert!(!response.contains(reason), "{name} leaked {reason}");
+			}
+		}
 	}
+}
+
+#[rstest::rstest]
+#[case::quarantine(true, "uid-1", "run-1", "actor-quarantined")]
+#[case::replacement(false, "uid-2", "run-1", "actor-uid-mismatch")]
+#[case::earlier_activation(false, "uid-1", "run-2", "activation-mismatch")]
+#[tokio::test]
+async fn substrate_egress_connect_refusal_has_a_stable_reason(
+	#[case] quarantine: bool,
+	#[case] uid: &'static str,
+	#[case] activation: &'static str,
+	#[case] reason: &str,
+) {
+	let uri = "spiffe://substrate-actor.local/worker-for-actor/demo/my-actor";
+	let api = ateapimock::AteApiMock::new(move || EgressHandler {
+		uid,
+		state: Some(ActorState::Running as i32),
+		activation_id: activation,
+		quarantine,
+		..Default::default()
+	})
+	.spawn()
+	.await;
+	let certificate = actor_certificate_with_identity(uri, Some("uid-1"), Some("run-1"));
+	let (status, response) =
+		substrate_egress_connect_response_at_certificate(api.address, certificate, b"").await;
+	assert_eq!(status, StatusCode::FORBIDDEN);
+	assert!(
+		response.ends_with(reason),
+		"CONNECT response {response:?} lacks {reason}"
+	);
 }
 
 #[tokio::test]
