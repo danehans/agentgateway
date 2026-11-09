@@ -2,6 +2,7 @@ pub(crate) mod ateattr;
 mod egress;
 mod egress_actor_resolution;
 mod ingress;
+pub(crate) mod revocation;
 
 pub use egress::SubstrateEgress;
 pub(crate) use egress::{EgressRequestProtocol, EgressTlsMode, authorize_tls, reject_upgrade};

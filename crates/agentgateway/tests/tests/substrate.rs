@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Mutex;
 
 use agentgateway::test_helpers::{ateapimock, credprovidermock, extprocmock, oteltracemock};
 use agentgateway::transport::stream::{SocketType, TLSConnectionInfo};
@@ -2197,13 +2198,25 @@ async fn open_actor_egress_tunnel_protocol(
 	port: u16,
 	http2: bool,
 ) -> tokio_util::either::Either<tokio::io::DuplexStream, TokioIo<hyper::upgrade::Upgraded>> {
+	open_actor_egress_tunnel_certificate(
+		gateway,
+		port,
+		http2,
+		actor_certificate("spiffe://substrate-actor.local/worker-for-actor/demo/my-actor"),
+	)
+	.await
+}
+async fn open_actor_egress_tunnel_certificate(
+	gateway: &TestBind,
+	port: u16,
+	http2: bool,
+	certificate: String,
+) -> tokio_util::either::Either<tokio::io::DuplexStream, TokioIo<hyper::upgrade::Upgraded>> {
 	let mut io = gateway.serve_tunnel_with_tls_info(
 		strng::literal!("outer"),
 		Some(TLSConnectionInfo {
 			src_identity: Some(TlsInfo {
-				certificate: Some(
-					actor_certificate("spiffe://substrate-actor.local/worker-for-actor/demo/my-actor").into(),
-				),
+				certificate: Some(certificate.into()),
 				..Default::default()
 			}),
 			..Default::default()
@@ -3979,4 +3992,518 @@ async fn substrate_egress_accepts_valid_actor_connect_before_protocol_detection(
 			StatusCode::OK,
 		);
 	}
+}
+
+#[derive(Clone)]
+struct RevocationHandler {
+	policy: Option<EgressPolicy>,
+	view: Arc<Mutex<EgressHandler>>,
+	calls: Arc<AtomicUsize>,
+	delay_ms: Arc<AtomicUsize>,
+}
+#[async_trait::async_trait]
+impl ateapimock::Handler for RevocationHandler {
+	async fn get_actor_egress_policy(
+		&mut self,
+		_: &protos::ateapi::GetActorEgressPolicyRequest,
+	) -> Result<EgressPolicy, tonic::Status> {
+		Ok(self.policy.clone().unwrap_or_default())
+	}
+	async fn get_actor(
+		&mut self,
+		request: &protos::ateapi::GetActorRequest,
+	) -> Result<Actor, tonic::Status> {
+		let mut view = self.view.lock().unwrap().clone();
+		self.calls.fetch_add(1, Ordering::Relaxed);
+		let delay = self.delay_ms.load(Ordering::Relaxed);
+		tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+		view.get_actor(request).await
+	}
+}
+
+#[rstest::rstest]
+#[case("quarantine")]
+#[case("uid")]
+#[case("activation")]
+#[case("outage")]
+#[case("slow")]
+#[tokio::test]
+async fn substrate_revocation_closes_running_actor_tunnels(
+	#[case] trigger: &str,
+	#[values(0, 1, 2, 3, 4)] trial: usize,
+) {
+	let view = Arc::new(Mutex::new(EgressHandler {
+		uid: "uid-1",
+		activation_id: "run-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	}));
+	let calls = Arc::new(AtomicUsize::new(0));
+	let delay_ms = Arc::new(AtomicUsize::new(0));
+	let upstream = simple_mock().await;
+	let address = *upstream.address();
+	let port = address.port();
+	let handler = RevocationHandler {
+		policy: Some(EgressPolicy {
+			rules: vec![protos::ateapi::EgressRule {
+				http: Some(protos::ateapi::HttpRule {
+					hostnames: vec!["localhost".to_owned()],
+					ports: Some(protos::ateapi::Ports {
+						numbers: vec![i32::from(port)],
+						..Default::default()
+					}),
+					effects: None,
+				}),
+				..Default::default()
+			}],
+			..Default::default()
+		}),
+		view: view.clone(),
+		calls: calls.clone(),
+		delay_ms: delay_ms.clone(),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+
+	let gateway = q6_http_gateway(api.address, port).await;
+	let certificate = actor_certificate_with_identity(
+		"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+		Some("uid-1"),
+		Some("run-1"),
+	);
+	let mut tunnels = Vec::new();
+	for _ in 0..3 {
+		let mut io = open_q6_tcp_tunnel(&gateway, &certificate, port).await;
+		q6_http_request(&mut io, "before", port).await;
+		tunnels.push(io);
+	}
+	assert_eq!(calls.load(Ordering::Relaxed), 3);
+	view.lock().unwrap().held = true;
+	let lookup_sample = std::time::Instant::now();
+	tokio::time::sleep(Duration::from_millis(5200)).await;
+	assert_eq!(
+		calls.load(Ordering::Relaxed),
+		4,
+		"three tunnels must share one lookup"
+	);
+	println!(
+		"Q6 A=1 T=3 R=1 trial={trial} continuing_lookups=1 sample_seconds={:.6} continuing_lookups_per_second={:.6}",
+		lookup_sample.elapsed().as_secs_f64(),
+		1.0 / lookup_sample.elapsed().as_secs_f64()
+	);
+	for io in &mut tunnels {
+		q6_http_request(io, "held", port).await;
+	}
+	match trigger {
+		"quarantine" => view.lock().unwrap().quarantine = true,
+		"uid" => {
+			let mut v = view.lock().unwrap();
+			v.uid = "uid-2";
+			v.quarantine = true;
+		},
+		"activation" => {
+			let mut v = view.lock().unwrap();
+			v.activation_id = "run-2";
+			v.quarantine = true;
+		},
+		"outage" => view.lock().unwrap().error = Some(tonic::Code::Unavailable),
+		"slow" => delay_ms.store(3000, Ordering::Relaxed),
+		_ => unreachable!(),
+	}
+	let start = std::time::Instant::now();
+	for io in &mut tunnels {
+		let mut b = [0; 1];
+		let closed = tokio::time::timeout(Duration::from_secs(8), io.read(&mut b))
+			.await
+			.expect("close budget exceeded");
+		assert!(
+			matches!(closed, Ok(0) | Err(_)),
+			"revoked tunnel passed bytes"
+		);
+	}
+	println!(
+		"Q6 A=1 T=3 R=1 trigger={trigger} trial={trial} close_ms={} lookups={}",
+		start.elapsed().as_millis(),
+		calls.load(Ordering::Relaxed)
+	);
+	*view.lock().unwrap() = EgressHandler {
+		uid: "uid-1",
+		activation_id: "run-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	};
+	delay_ms.store(0, Ordering::Relaxed);
+	let mut reopened = open_q6_tcp_tunnel(&gateway, &certificate, port).await;
+	q6_http_request(&mut reopened, "released", port).await;
+}
+
+#[cfg(feature = "crypto-aws-lc")]
+#[rstest::rstest]
+#[case::passthrough(true)]
+#[case::mitm(false)]
+#[tokio::test]
+async fn substrate_revocation_closes_tls_and_pooled_h2(
+	#[case] passthrough: bool,
+	#[values(0, 1, 2, 3, 4)] trial: usize,
+) {
+	let (upstream, certs) = tls_mock().await;
+	wiremock::Mock::given(wiremock::matchers::path("/pending"))
+		.respond_with(wiremock::ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+		.with_priority(1)
+		.mount(&upstream)
+		.await;
+	let address = *upstream.address();
+	let port = address.port();
+	let ports = Some(protos::ateapi::Ports {
+		numbers: vec![i32::from(port)],
+		..Default::default()
+	});
+	let rule = if passthrough {
+		protos::ateapi::EgressRule {
+			tls_passthrough: Some(protos::ateapi::TlsPassthroughRule {
+				hostnames: vec!["localhost".to_owned()],
+				ports,
+			}),
+			..Default::default()
+		}
+	} else {
+		protos::ateapi::EgressRule {
+			https: Some(protos::ateapi::HttpsRule {
+				hostnames: vec!["localhost".to_owned()],
+				ports,
+				effects: None,
+			}),
+			..Default::default()
+		}
+	};
+	let (mut gateway, _native_api) = substrate_tls_gateway(
+		Ok(EgressPolicy {
+			rules: vec![rule.clone()],
+			..Default::default()
+		}),
+		ActorState::Running,
+		address,
+		Some(certs.root_cert.pem().into_bytes()),
+	)
+	.await;
+	let view = Arc::new(Mutex::new(EgressHandler {
+		uid: "uid-1",
+		activation_id: "run-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	}));
+	let handler = RevocationHandler {
+		policy: Some(EgressPolicy {
+			rules: vec![rule],
+			..Default::default()
+		}),
+		view: view.clone(),
+		calls: Default::default(),
+		delay_ms: Default::default(),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+	gateway
+		.attach_frontend_policy_with_port(
+			json!({ "substrateEgressActorResolution": { "host": api.address.to_string() } }),
+			Some(15013),
+		)
+		.await;
+	let certificate = actor_certificate_with_identity(
+		"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+		Some("uid-1"),
+		Some("run-1"),
+	);
+	let io = open_actor_egress_tunnel_certificate(&gateway, port, true, certificate).await;
+	let root = if passthrough {
+		certs.root_cert.pem().into_bytes()
+	} else {
+		include_bytes!("../../../../examples/mcp-tls/certs/ca-cert.pem").to_vec()
+	};
+	let tls: agentgateway::http::backendtls::BackendTLS =
+		agentgateway::http::backendtls::ResolvedBackendTLS {
+			root: Some(root),
+			alpn: Some(vec!["h2".to_owned()]),
+			..Default::default()
+		}
+		.try_into()
+		.unwrap();
+	let io = tokio_rustls::TlsConnector::from(tls.base_config().config)
+		.connect(
+			rustls_pki_types::ServerName::try_from("localhost").unwrap(),
+			io,
+		)
+		.await
+		.unwrap();
+	let (mut sender, connection) =
+		hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+			.handshake(TokioIo::new(io))
+			.await
+			.unwrap();
+	let connection = tokio::spawn(connection);
+	for _ in 0..3 {
+		let response = sender
+			.send_request(
+				::http::Request::builder()
+					.uri("https://localhost/pooled")
+					.body(Body::empty())
+					.unwrap(),
+			)
+			.await
+			.unwrap();
+		assert_eq!(response.status(), StatusCode::OK);
+		response.into_body().collect().await.unwrap();
+	}
+	let pending = sender.send_request(
+		::http::Request::builder()
+			.uri("https://localhost/pending")
+			.body(Body::empty())
+			.unwrap(),
+	);
+	let pending = tokio::spawn(pending);
+	tokio::time::timeout(Duration::from_secs(3), async {
+		loop {
+			if upstream
+				.received_requests()
+				.await
+				.unwrap()
+				.iter()
+				.any(|request| request.url.path() == "/pending")
+			{
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("pending request was not forwarded before quarantine");
+	view.lock().unwrap().quarantine = true;
+	let start = std::time::Instant::now();
+	let result = tokio::time::timeout(Duration::from_secs(8), pending)
+		.await
+		.expect("in-flight H2 stream survived revocation")
+		.unwrap();
+	assert!(result.is_err());
+	assert!(
+		sender
+			.send_request(
+				::http::Request::builder()
+					.uri("https://localhost/after")
+					.body(Body::empty())
+					.unwrap()
+			)
+			.await
+			.is_err()
+	);
+	println!(
+		"Q6 A=1 T=1 R=1 passthrough={passthrough} trial={trial} pooled_h2_close_ms={}",
+		start.elapsed().as_millis()
+	);
+	connection.abort();
+}
+
+async fn open_q6_tcp_tunnel(
+	gateway: &TestBind,
+	certificate: &str,
+	port: u16,
+) -> tokio::io::DuplexStream {
+	let mut io = gateway.serve_tunnel_with_tls_info(
+		strng::literal!("outer"),
+		Some(TLSConnectionInfo {
+			src_identity: Some(TlsInfo {
+				certificate: Some(certificate.to_owned().into()),
+				..Default::default()
+			}),
+			..Default::default()
+		}),
+	);
+	io.write_all(
+		format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
+	)
+	.await
+	.unwrap();
+	let mut response = Vec::new();
+	while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+		let mut b = [0; 256];
+		let n = io.read(&mut b).await.unwrap();
+		assert_ne!(n, 0);
+		response.extend_from_slice(&b[..n]);
+	}
+	assert!(response.starts_with(b"HTTP/1.1 200"));
+	io
+}
+
+async fn q6_http_request(io: &mut tokio::io::DuplexStream, path: &str, port: u16) {
+	io.write_all(format!("GET /{path} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").as_bytes())
+		.await
+		.unwrap();
+	let mut response = Vec::new();
+	loop {
+		let mut b = [0; 1024];
+		let n = tokio::time::timeout(Duration::from_secs(3), io.read(&mut b))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_ne!(n, 0, "HTTP connection closed before response");
+		response.extend_from_slice(&b[..n]);
+		if let Some(end) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+			let headers = String::from_utf8_lossy(&response[..end]);
+			assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+			let length = headers
+				.lines()
+				.find_map(|line| {
+					line
+						.to_ascii_lowercase()
+						.strip_prefix("content-length:")
+						.map(|s| s.trim().parse::<usize>().unwrap())
+				})
+				.unwrap();
+			if response.len() >= end + 4 + length {
+				break;
+			}
+		}
+	}
+}
+
+async fn q6_http_gateway(api_address: SocketAddr, port: u16) -> TestBind {
+	let mut outer = simple_bind();
+	outer.key = strng::literal!("outer");
+	outer.address = "127.0.0.1:15012".parse().unwrap();
+	outer.mode = BindMode::Internal;
+	let mut inner = simple_bind();
+	inner.address = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+	inner.mode = BindMode::Internal;
+
+	let mut gateway = setup_proxy_test("{}")
+		.unwrap()
+		.with_raw_backend(BackendWithPolicies {
+			backend: Backend::Dynamic(ResourceName::new("dynamic".into(), "".into()), None),
+			inline_policies: vec![],
+		})
+		.with_bind(outer)
+		.with_bind(inner)
+		.with_route(basic_named_route("/dynamic".into()))
+		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15012);
+	gateway
+		.attach_frontend_policy(
+			json!({ "substrateEgressActorResolution": { "host": api_address.to_string() } }),
+		)
+		.await;
+	gateway
+		.attach_route_policy(json!({ "substrateEgress": { "host": api_address.to_string() } }))
+		.await;
+	gateway
+}
+
+#[tokio::test]
+async fn substrate_revocation_connect_quarantine_race() {
+	let upstream = simple_mock().await;
+	let port = upstream.address().port();
+	let view = Arc::new(Mutex::new(EgressHandler {
+		uid: "uid-1",
+		activation_id: "run-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	}));
+	let calls = Arc::new(AtomicUsize::new(0));
+	let handler = RevocationHandler {
+		policy: None,
+		view: view.clone(),
+		calls: calls.clone(),
+		delay_ms: Arc::new(AtomicUsize::new(250)),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+	let gateway = q6_http_gateway(api.address, port).await;
+	let certificate = actor_certificate_with_identity(
+		"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+		Some("uid-1"),
+		Some("run-1"),
+	);
+	let connect = open_q6_tcp_tunnel(&gateway, &certificate, port);
+	let mutate = async {
+		tokio::time::timeout(Duration::from_secs(2), async {
+			while calls.load(Ordering::Relaxed) == 0 {
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.unwrap();
+		view.lock().unwrap().quarantine = true;
+	};
+	let (mut tunnel, ()) = tokio::join!(connect, mutate);
+	let mut b = [0; 1];
+	let result = tokio::time::timeout(Duration::from_secs(8), tunnel.read(&mut b))
+		.await
+		.expect("CONNECT race left tunnel authorized");
+	assert!(matches!(result, Ok(0) | Err(_)));
+}
+
+#[tokio::test]
+async fn substrate_revocation_gateway_runtime_loss_closes_tunnel() {
+	let upstream = simple_mock().await;
+	let port = upstream.address().port();
+	let handler = RevocationHandler {
+		policy: Some(EgressPolicy {
+			rules: vec![protos::ateapi::EgressRule {
+				http: Some(protos::ateapi::HttpRule {
+					hostnames: vec!["localhost".to_owned()],
+					ports: Some(protos::ateapi::Ports {
+						numbers: vec![i32::from(port)],
+						..Default::default()
+					}),
+					effects: None,
+				}),
+				..Default::default()
+			}],
+			..Default::default()
+		}),
+		view: Arc::new(Mutex::new(EgressHandler {
+			uid: "uid-1",
+			activation_id: "run-1",
+			state: Some(ActorState::Running as i32),
+			..Default::default()
+		})),
+		calls: Default::default(),
+		delay_ms: Default::default(),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+	let address = api.address;
+	let (ready, receive) = tokio::sync::oneshot::channel();
+	let (stop, stopped) = tokio::sync::oneshot::channel();
+	let thread = std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap();
+		runtime.block_on(async {
+			let gateway = q6_http_gateway(address, port).await;
+			let certificate = actor_certificate_with_identity(
+				"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+				Some("uid-1"),
+				Some("run-1"),
+			);
+			let tunnel = open_q6_tcp_tunnel(&gateway, &certificate, port).await;
+			ready.send(tunnel).unwrap();
+			stopped.await.unwrap();
+		});
+		// Dropping this isolated runtime aborts every gateway task, including upgraded CONNECTs.
+	});
+	let mut tunnel = tokio::time::timeout(Duration::from_secs(3), receive)
+		.await
+		.unwrap()
+		.unwrap();
+	q6_http_request(&mut tunnel, "before-loss", port).await;
+	stop.send(()).unwrap();
+	let mut b = [0; 1];
+	let result = tokio::time::timeout(Duration::from_secs(3), tunnel.read(&mut b))
+		.await
+		.expect("gateway runtime loss left tunnel open");
+	assert!(matches!(result, Ok(0) | Err(_)));
+	thread.join().unwrap();
 }

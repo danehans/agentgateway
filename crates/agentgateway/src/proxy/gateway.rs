@@ -813,8 +813,27 @@ impl Gateway {
 						debug!(bind = %bind.key, target = %target_address, "CONNECT tunnel terminated");
 					}
 
+					let revocation = actor_identity
+						.as_ref()
+						.filter(|identity| identity.activation_id.is_some())
+						.zip(substrate_egress_actor_resolution.as_ref())
+						.map(|(identity, policy)| policy.monitor(&inputs, identity, authority.as_str()));
+
+					let tunnel_metrics = revocation.as_ref().map(|_| substrate::revocation::TunnelMetrics::new(inputs.metrics.clone()));
+					let close_identity = actor_identity.clone();
+					let close_authority = authority.clone();
 					tokio::task::spawn(async move {
-						let downstream = match upgrade.await {
+						let upgraded = upgrade;
+						let result = if let Some(lease) = revocation.as_ref() {
+							tokio::select! { biased;
+								_ = lease.cancelled.cancelled() => { if let Some(metrics) = &tunnel_metrics { metrics.closed(); }
+									log_revocation(lease, close_identity.as_ref(), &close_authority); return; },
+								result = upgraded => result,
+							}
+						} else {
+							upgraded.await
+						};
+						let downstream = match result {
 							Ok(u) => u,
 							Err(e) => {
 								error!("CONNECT upgrade error: {e}");
@@ -822,6 +841,7 @@ impl Gateway {
 							},
 						};
 						let mut downstream = Socket::from_upgraded(connection, target_address, downstream);
+						if let Some(lease) = revocation.as_ref() { downstream.ext_mut().insert(lease.cancelled.clone()); }
 						if let Some(identity) = actor_identity {
 							downstream.ext_mut().insert(identity);
 						}
@@ -833,7 +853,21 @@ impl Gateway {
 						if let Some(buffer) = buffer {
 							downstream.ext_mut().insert(BufferLimit::new(buffer));
 						}
-						Self::proxy_bind(bind.key.clone(), bind.protocol, downstream, inputs, drain).await;
+						let proxy =
+							Self::proxy_bind(bind.key.clone(), bind.protocol, downstream, inputs, drain);
+						tokio::pin!(proxy);
+						if let Some(lease) = revocation {
+							tokio::select! { biased;
+								_ = lease.cancelled.cancelled() => {
+									let _ = tokio::time::timeout(Duration::from_secs(1), &mut proxy).await;
+									if let Some(metrics) = &tunnel_metrics { metrics.closed(); }
+									log_revocation(&lease, close_identity.as_ref(), &close_authority);
+								},
+								_ = &mut proxy => {},
+							}
+						} else {
+							proxy.await;
+						}
 					});
 
 					Ok(
@@ -859,7 +893,8 @@ impl Gateway {
 		drain: DrainWatcher,
 	) -> anyhow::Result<()> {
 		let target_address = stream.target_address();
-		let server = auto_server(policies.http.as_ref());
+		let revocation = stream.ext::<tokio_util::sync::CancellationToken>().cloned();
+		let server = auto_server_with_revocation(policies.http.as_ref(), revocation.clone());
 
 		// Precompute transport labels and metrics before moving `selected_listener` and `inputs`
 		let tcp = stream
@@ -1037,34 +1072,40 @@ impl Gateway {
 				}
 			};
 			tokio::pin!(max_connection_duration);
-			let mode = if let Some((serving_listener, listener_change)) = listener_drain {
-				let stores = drain_proxy.inputs.stores.clone();
-				let bind_name = drain_proxy.bind_name.clone();
-				let listener_key = serving_listener.key.clone();
-				tokio::select! {
-					drain = parent_drain.wait_for_drain() => drain.mode(),
-					_ = Self::wait_for_listener_change(
-						stores,
-						bind_name.clone(),
-						serving_listener.clone(),
-						listener_change,
-					) => {
-						info!(bind=%bind_name, listener=%listener_key, "listener changed, draining downstream TLS connection");
-						drain::DrainMode::Graceful
-					},
-					_ = &mut max_connection_duration => {
-						debug!("connection closed: max connection duration reached");
-						drain::DrainMode::Graceful
-					},
+			let mode = async {
+				if let Some((serving_listener, listener_change)) = listener_drain {
+					let stores = drain_proxy.inputs.stores.clone();
+					let bind_name = drain_proxy.bind_name.clone();
+					let listener_key = serving_listener.key.clone();
+					tokio::select! {
+						drain = parent_drain.wait_for_drain() => drain.mode(),
+						_ = Self::wait_for_listener_change(
+							stores,
+							bind_name.clone(),
+							serving_listener.clone(),
+							listener_change,
+						) => {
+							info!(bind=%bind_name, listener=%listener_key, "listener changed, draining downstream TLS connection");
+							drain::DrainMode::Graceful
+						},
+						_ = &mut max_connection_duration => {
+							debug!("connection closed: max connection duration reached");
+							drain::DrainMode::Graceful
+						},
+					}
+				} else {
+					tokio::select! {
+						drain = parent_drain.wait_for_drain() => drain.mode(),
+						_ = &mut max_connection_duration => {
+							debug!("connection closed: max connection duration reached");
+							drain::DrainMode::Graceful
+						},
+					}
 				}
-			} else {
-				tokio::select! {
-					drain = parent_drain.wait_for_drain() => drain.mode(),
-					_ = &mut max_connection_duration => {
-						debug!("connection closed: max connection duration reached");
-						drain::DrainMode::Graceful
-					},
-				}
+			};
+			let mode = tokio::select! {
+				_ = async { match revocation { Some(token) => token.cancelled().await, None => std::future::pending().await } } => drain::DrainMode::Graceful,
+				mode = mode => mode,
 			};
 			connection_drain_tx.start_drain_and_wait(mode).await;
 		};
@@ -1076,8 +1117,8 @@ impl Gateway {
 		} else {
 			tokio::spawn(watch_connection_drain)
 		};
+		let _watch_guard = substrate::revocation::AbortOnDrop(watch_task.abort_handle());
 		let res = connection_drain_rx.wrap_connection(serve).await;
-		watch_task.abort();
 		match res {
 			Ok(_) => Ok(()),
 			Err(e) => {
@@ -1162,7 +1203,12 @@ impl Gateway {
 			selected_listener,
 			target_address,
 		};
-		proxy.proxy(stream).await
+		let revoked = stream.ext::<tokio_util::sync::CancellationToken>().cloned();
+		if let Some(token) = revoked {
+			tokio::select! { biased; _ = token.cancelled() => {}, _ = proxy.proxy(stream) => {} }
+		} else {
+			proxy.proxy(stream).await
+		}
 	}
 
 	async fn wait_for_listener_change(
@@ -1790,8 +1836,31 @@ async fn peek_auto_protocol<R: tokio::io::AsyncRead + Unpin>(
 	Ok(total)
 }
 
-pub fn auto_server(c: Option<&frontend::HTTP>) -> auto::Builder<::hyper_util::rt::TokioExecutor> {
-	let mut b = auto::Builder::new(::hyper_util::rt::TokioExecutor::new());
+fn log_revocation(
+	lease: &substrate::revocation::Lease,
+	identity: Option<&ActorIdentity>,
+	authority: &::http::uri::Authority,
+) {
+	if let Some(identity) = identity {
+		warn!(target: "agentgateway::substrate::connect_revocation",
+			reason_code = *lease.reason.lock().expect("reason poisoned"),
+			actor_atespace = %identity.atespace, actor_name = %identity.actor_name,
+			actor_uid = identity.actor_uid.as_deref().unwrap_or(""),
+			activation_id = identity.activation_id.as_deref().unwrap_or(""),
+			connect_authority = %authority, "Substrate CONNECT revoked");
+	}
+}
+
+pub(crate) fn auto_server(
+	c: Option<&frontend::HTTP>,
+) -> auto::Builder<substrate::revocation::Executor> {
+	auto_server_with_revocation(c, None)
+}
+fn auto_server_with_revocation(
+	c: Option<&frontend::HTTP>,
+	cancelled: Option<tokio_util::sync::CancellationToken>,
+) -> auto::Builder<substrate::revocation::Executor> {
+	let mut b = auto::Builder::new(substrate::revocation::Executor(cancelled));
 	b.http2().timer(hyper_util::rt::tokio::TokioTimer::new());
 	b.http1().timer(hyper_util::rt::tokio::TokioTimer::new());
 	let def = frontend::HTTP::default();
