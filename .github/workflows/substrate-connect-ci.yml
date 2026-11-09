@@ -34,7 +34,10 @@ jobs:
       - name: Start validation dependencies
         run: tools/manage-validation-deps.sh start
       - name: Test
-        run: make test
+        run: |
+          make test
+          cargo test -p agentgateway --lib
+          cargo test -p agentgateway --test integration
         env:
           KEYCLOAK_AVAILABLE: 1
       - name: Stop validation dependencies
