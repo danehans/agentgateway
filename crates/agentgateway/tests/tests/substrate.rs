@@ -3809,6 +3809,8 @@ async fn substrate_egress_binds_connect_to_current_actor_and_activation() {
 #[case::quarantine(true, "uid-1", "run-1", "actor-quarantined")]
 #[case::replacement(false, "uid-2", "run-1", "actor-uid-mismatch")]
 #[case::earlier_activation(false, "uid-1", "run-2", "activation-mismatch")]
+#[case::quarantined_replacement(true, "uid-2", "run-2", "actor-uid-mismatch")]
+#[case::quarantined_earlier_activation(true, "uid-1", "run-2", "activation-mismatch")]
 #[tokio::test]
 async fn substrate_egress_connect_refusal_has_a_stable_reason(
 	#[case] quarantine: bool,
@@ -3830,10 +3832,80 @@ async fn substrate_egress_connect_refusal_has_a_stable_reason(
 	let (status, response) =
 		substrate_egress_connect_response_at_certificate(api.address, certificate, b"").await;
 	assert_eq!(status, StatusCode::FORBIDDEN);
-	assert!(
-		response.ends_with(reason),
-		"CONNECT response {response:?} lacks {reason}"
-	);
+	let body = response.split_once("\r\n\r\n").unwrap().1;
+	assert_eq!(body, reason);
+}
+
+#[tokio::test]
+async fn substrate_egress_connect_without_authority_is_bad_request() {
+	let api = ateapimock::AteApiMock::new(|| EgressHandler {
+		uid: "uid-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	})
+	.spawn()
+	.await;
+	let mut outer = simple_bind();
+	outer.key = strng::literal!("outer");
+	outer.address = "127.0.0.1:15012".parse().unwrap();
+	let mut inner = simple_bind();
+	inner.address = "0.0.0.0:18080".parse().unwrap();
+	inner.mode = BindMode::Internal;
+	let mut gateway = setup_proxy_test("{}")
+		.unwrap()
+		.with_bind(outer)
+		.with_bind(inner)
+		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15012);
+	gateway
+		.attach_frontend_policy(json!({
+			"substrateEgressActorResolution": { "host": api.address.to_string() }
+		}))
+		.await;
+	let certificate =
+		actor_certificate("spiffe://substrate-actor.local/worker-for-actor/demo/my-actor");
+	let tls = || TLSConnectionInfo {
+		src_identity: Some(TlsInfo {
+			certificate: Some(certificate.clone().into()),
+			..Default::default()
+		}),
+		..Default::default()
+	};
+
+	let mut http1 = gateway.serve_tunnel_with_tls_info(strng::literal!("outer"), Some(tls()));
+	http1
+		.write_all(b"CONNECT /x HTTP/1.1\r\nHost: allowed.example:18080\r\n\r\n")
+		.await
+		.unwrap();
+	let mut response = [0; 256];
+	let n = tokio::time::timeout(Duration::from_secs(5), http1.read(&mut response))
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 400 Bad Request\r\n"));
+
+	let http2 = gateway.serve_tunnel_with_tls_info(strng::literal!("outer"), Some(tls()));
+	let (mut client, connection) = h2::client::handshake(http2).await.unwrap();
+	let connection = tokio::spawn(connection);
+	let request = ::http::Request::builder()
+		.method(Method::CONNECT)
+		.uri("/x")
+		.version(Version::HTTP_11)
+		.body(())
+		.unwrap();
+	match client.send_request(request, true) {
+		Ok((response, _)) => match response.await {
+			Ok(response) => assert_eq!(response.status(), StatusCode::BAD_REQUEST),
+			Err(error) => assert!(
+				error.is_remote() && error.reason() == Some(h2::Reason::PROTOCOL_ERROR),
+				"unexpected HTTP/2 error: {error}"
+			),
+		},
+		Err(error) => assert!(
+			error.is_library() && error.reason() == Some(h2::Reason::PROTOCOL_ERROR),
+			"unexpected HTTP/2 error: {error}"
+		),
+	}
+	connection.abort();
 }
 
 #[tokio::test]
