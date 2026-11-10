@@ -1,6 +1,8 @@
 pub mod admission;
 pub mod dtrace;
 mod gateway;
+#[cfg(test)]
+pub(crate) use gateway::log_revocation;
 pub mod httpproxy;
 pub mod policy_host;
 pub mod proxy_protocol;
