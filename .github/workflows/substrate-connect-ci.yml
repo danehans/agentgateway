@@ -57,6 +57,6 @@ jobs:
         with:
           cache-key: substrate-connect-lint
       - name: Generation
-        run: make generate-schema check-clean-repo check-default-members
+        run: make gen check-clean-repo check-default-members
       - name: Lint
         run: make lint

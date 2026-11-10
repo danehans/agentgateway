@@ -1,4 +1,4 @@
-use protos::ateapi::ActorState;
+use protos::ateapi::{Actor, ActorState};
 use serde::Deserialize;
 use tonic::Code;
 use x509_parser::extensions::GeneralName;
@@ -209,25 +209,27 @@ impl EgressActorResolution {
 		let policy = self.clone();
 		let inputs_for_check = inputs.clone();
 		let authority = authority.to_owned();
-		let key = serde_json::to_string(&self.target).expect("serializable backend")
-			+ &format!(
-				"/{}/{}/{}/{:?}",
-				identity.atespace, identity.actor_name, certificate.uid, certificate.activation_id
-			);
-		inputs
-			.substrate_revocations
-			.register(key, Some(inputs.metrics.clone()), move || {
+		let key = serde_json::to_string(&(
+			&self.target,
+			&identity.atespace,
+			&identity.actor_name,
+			&certificate.uid,
+		))
+		.expect("serializable actor poll key");
+		let actor = certificate.actor.clone();
+		let binding = (certificate.uid.clone(), certificate.activation_id.clone());
+		inputs.substrate_revocations.register(
+			key,
+			binding,
+			Some(inputs.metrics.clone()),
+			move || {
 				let policy = policy.clone();
 				let inputs = inputs_for_check.clone();
-				let certificate = certificate.clone();
-				let authority = authority.clone();
-				async move {
-					policy
-						.authorize(&PolicyClient::new(inputs), &certificate, &authority, false)
-						.await
-						.map(|_| ())
-				}
-			})
+				let actor = actor.clone();
+				async move { policy.actor(&PolicyClient::new(inputs), &actor).await }
+			},
+			move |current| Self::validate(current, &certificate, &authority, false).map(|_| ()),
+		)
 	}
 
 	async fn authorize(
@@ -237,6 +239,11 @@ impl EgressActorResolution {
 		authority: &str,
 		connect_admission: bool,
 	) -> Result<ActorIdentity, ProxyError> {
+		let current = self.actor(client, &identity.actor).await?;
+		Self::validate(&current, identity, authority, connect_admission)
+	}
+
+	async fn actor(&self, client: &PolicyClient, actor: &ActorRef) -> Result<Actor, ProxyError> {
 		let channel = self
 			.target
 			.grpc_channel(client.with_outbound(OutboundCallKind::Policy, OutboundCallSubtype::Substrate));
@@ -245,25 +252,31 @@ impl EgressActorResolution {
 			Some(TRACE_POLICY_KIND),
 			control.get_actor(protos::ateapi::GetActorRequest {
 				actor: Some(protos::ateapi::ObjectRef {
-					atespace: identity.actor.atespace.clone(),
-					name: identity.actor.name.clone(),
+					atespace: actor.atespace.clone(),
+					name: actor.name.clone(),
 				}),
 			}),
 		)
 		.await;
-		let current = match result {
-			Ok(response) => response.into_inner(),
+		match result {
+			Ok(response) => Ok(response.into_inner()),
 			Err(status) if matches!(status.code(), Code::Unavailable | Code::DeadlineExceeded) => {
-				return Err(ProxyError::SubstrateEgressUnavailable(format!(
+				Err(ProxyError::SubstrateEgressUnavailable(format!(
 					"actor identity check unavailable: {status}"
-				)));
+				)))
 			},
-			Err(status) => {
-				return Err(ProxyError::SubstrateEgressDenied(format!(
-					"actor identity check denied: {status}"
-				)));
-			},
-		};
+			Err(status) => Err(ProxyError::SubstrateEgressDenied(format!(
+				"actor identity check denied: {status}"
+			))),
+		}
+	}
+
+	fn validate(
+		current: &Actor,
+		identity: &CertificateActorIdentity,
+		authority: &str,
+		connect_admission: bool,
+	) -> Result<ActorIdentity, ProxyError> {
 		let refusal = |reason| connect_refusal(identity, authority, reason, connect_admission);
 		let status = current.status.as_ref();
 		let uid = current
