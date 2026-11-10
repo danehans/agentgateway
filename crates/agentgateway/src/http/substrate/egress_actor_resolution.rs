@@ -17,8 +17,10 @@ pub(crate) struct ActorIdentity {
 	pub(crate) atespace: String,
 	pub(crate) actor_name: String,
 	pub(crate) actor_uid: Option<String>,
+	pub(crate) activation_id: Option<String>,
 }
 
+#[derive(Clone)]
 struct CertificateActorIdentity {
 	actor: ActorRef,
 	uid: String,
@@ -33,7 +35,11 @@ fn connect_refusal(
 	identity: &CertificateActorIdentity,
 	authority: &str,
 	reason: &'static str,
+	connect_admission: bool,
 ) -> ProxyError {
+	if !connect_admission {
+		return ProxyError::SubstrateEgressConnectDenied(reason);
+	}
 	warn!(
 		target: "agentgateway::substrate::connect_refusal",
 		reason_code = reason,
@@ -178,8 +184,50 @@ impl EgressActorResolution {
 				&PolicyClient::new(inputs.clone()).with_parent(req),
 				&actor,
 				authority,
+				true,
 			)
 			.await
+	}
+
+	pub(crate) fn monitor(
+		&self,
+		inputs: &Arc<ProxyInputs>,
+		identity: &ActorIdentity,
+		authority: &str,
+	) -> Arc<super::revocation::Lease> {
+		let certificate = CertificateActorIdentity {
+			actor: ActorRef {
+				atespace: identity.atespace.clone(),
+				name: identity.actor_name.clone(),
+			},
+			uid: identity
+				.actor_uid
+				.clone()
+				.expect("authorized certificate has UID"),
+			activation_id: identity.activation_id.clone(),
+		};
+		let policy = self.clone();
+		let inputs_for_check = inputs.clone();
+		let authority = authority.to_owned();
+		let key = serde_json::to_string(&self.target).expect("serializable backend")
+			+ &format!(
+				"/{}/{}/{}/{:?}",
+				identity.atespace, identity.actor_name, certificate.uid, certificate.activation_id
+			);
+		inputs
+			.substrate_revocations
+			.register(key, Some(inputs.metrics.clone()), move || {
+				let policy = policy.clone();
+				let inputs = inputs_for_check.clone();
+				let certificate = certificate.clone();
+				let authority = authority.clone();
+				async move {
+					policy
+						.authorize(&PolicyClient::new(inputs), &certificate, &authority, false)
+						.await
+						.map(|_| ())
+				}
+			})
 	}
 
 	async fn authorize(
@@ -187,6 +235,7 @@ impl EgressActorResolution {
 		client: &PolicyClient,
 		identity: &CertificateActorIdentity,
 		authority: &str,
+		connect_admission: bool,
 	) -> Result<ActorIdentity, ProxyError> {
 		let channel = self
 			.target
@@ -215,24 +264,25 @@ impl EgressActorResolution {
 				)));
 			},
 		};
+		let refusal = |reason| connect_refusal(identity, authority, reason, connect_admission);
 		let status = current.status.as_ref();
 		let uid = current
 			.metadata
 			.as_ref()
 			.map(|metadata| metadata.uid.as_str());
 		if uid != Some(identity.uid.as_str()) {
-			return Err(connect_refusal(identity, authority, ACTOR_UID_MISMATCH));
+			return Err(refusal(ACTOR_UID_MISMATCH));
 		}
 		if let Some(activation_id) = identity.activation_id.as_deref()
 			&& status.map(|status| status.activation_id.as_str()) != Some(activation_id)
 		{
-			return Err(connect_refusal(identity, authority, ACTIVATION_MISMATCH));
+			return Err(refusal(ACTIVATION_MISMATCH));
 		}
 		if status
 			.and_then(|status| status.quarantine.as_ref())
 			.is_some()
 		{
-			return Err(connect_refusal(identity, authority, ACTOR_QUARANTINED));
+			return Err(refusal(ACTOR_QUARANTINED));
 		}
 		// RESUMING is persisted with the worker assignment. Booting or restoring
 		// workloads may need egress before their wakeup probe makes them RUNNING.
@@ -248,6 +298,7 @@ impl EgressActorResolution {
 			atespace: identity.actor.atespace.clone(),
 			actor_name: identity.actor.name.clone(),
 			actor_uid: Some(identity.uid.clone()),
+			activation_id: identity.activation_id.clone(),
 		})
 	}
 }
@@ -297,7 +348,16 @@ mod tests {
 		tracing::subscriber::with_default(subscriber, || {
 			for reason in [ACTOR_QUARANTINED, ACTOR_UID_MISMATCH, ACTIVATION_MISMATCH] {
 				assert!(
-					matches!(connect_refusal(&identity, "192.0.2.10:443", reason), ProxyError::SubstrateEgressConnectDenied(code) if code == reason)
+					matches!(connect_refusal(&identity, "192.0.2.10:443", reason, false), ProxyError::SubstrateEgressConnectDenied(code) if code == reason)
+				);
+			}
+			assert!(
+				logs.lock().unwrap().is_empty(),
+				"periodic checks must not fabricate CONNECT refusals"
+			);
+			for reason in [ACTOR_QUARANTINED, ACTOR_UID_MISMATCH, ACTIVATION_MISMATCH] {
+				assert!(
+					matches!(connect_refusal(&identity, "192.0.2.10:443", reason, true), ProxyError::SubstrateEgressConnectDenied(code) if code == reason)
 				);
 			}
 		});

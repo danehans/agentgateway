@@ -1528,6 +1528,7 @@ pub fn setup_proxy_test_with_config_and_spiffe(
 
 		mcp_state: mcp::App::new(stores.clone(), encoder),
 		admission: Default::default(),
+		substrate_revocations: Default::default(),
 	});
 	TestBind {
 		pi,
