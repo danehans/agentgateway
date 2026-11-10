@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use protos::ateapi::Actor;
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -13,11 +14,23 @@ use crate::proxy::ProxyError;
 const INTERVAL: Duration = Duration::from_secs(5);
 const RPC_DEADLINE: Duration = Duration::from_secs(2);
 
-#[derive(Debug)]
+type Binding = (String, Option<String>);
+type Validate = dyn Fn(&Actor) -> Result<(), ProxyError> + Send + Sync;
+
 pub(crate) struct Lease {
 	pub(crate) cancelled: CancellationToken,
 	pub(crate) reason: Mutex<&'static str>,
 	metrics: Option<Arc<crate::telemetry::metrics::Metrics>>,
+	// Polling stops when the last live binding releases its group.
+	_group: Arc<ActorGroup>,
+	validate: Box<Validate>,
+}
+impl std::fmt::Debug for Lease {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Lease")
+			.field("cancelled", &self.cancelled)
+			.finish_non_exhaustive()
+	}
 }
 impl Drop for Lease {
 	fn drop(&mut self) {
@@ -28,9 +41,20 @@ impl Drop for Lease {
 	}
 }
 
+#[derive(Debug, Default)]
+struct ActorGroup {
+	bindings: Mutex<HashMap<Binding, Weak<Lease>>>,
+	cancelled: CancellationToken,
+}
+impl Drop for ActorGroup {
+	fn drop(&mut self) {
+		self.cancelled.cancel();
+	}
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Registry {
-	actors: Arc<Mutex<HashMap<String, Weak<Lease>>>>,
+	actors: Arc<Mutex<HashMap<String, Weak<ActorGroup>>>>,
 	permits: Arc<Semaphore>,
 }
 impl Default for Registry {
@@ -42,18 +66,30 @@ impl Default for Registry {
 	}
 }
 impl Registry {
-	pub(crate) fn register<F, Fut>(
+	pub(crate) fn register<F, Fut, V>(
 		&self,
 		key: String,
+		binding: Binding,
 		metrics: Option<Arc<crate::telemetry::metrics::Metrics>>,
 		check: F,
+		validate: V,
 	) -> Arc<Lease>
 	where
 		F: Fn() -> Fut + Send + Sync + 'static,
-		Fut: Future<Output = Result<(), ProxyError>> + Send + 'static,
+		Fut: Future<Output = Result<Actor, ProxyError>> + Send + 'static,
+		V: Fn(&Actor) -> Result<(), ProxyError> + Send + Sync + 'static,
 	{
 		let mut actors = self.actors.lock().expect("revocation registry poisoned");
-		if let Some(lease) = actors.get(&key).and_then(Weak::upgrade)
+		let (group, start) = match actors
+			.get(&key)
+			.and_then(Weak::upgrade)
+			.filter(|group| !group.cancelled.is_cancelled())
+		{
+			Some(group) => (group, false),
+			None => (Arc::new(ActorGroup::default()), true),
+		};
+		let mut bindings = group.bindings.lock().expect("actor group poisoned");
+		if let Some(lease) = bindings.get(&binding).and_then(Weak::upgrade)
 			&& !lease.cancelled.is_cancelled()
 		{
 			return lease;
@@ -65,12 +101,18 @@ impl Registry {
 			cancelled: CancellationToken::new(),
 			reason: Mutex::new("actor-check-failed"),
 			metrics: metrics.clone(),
+			_group: group.clone(),
+			validate: Box::new(validate),
 		});
-		let weak = Arc::downgrade(&lease);
+		bindings.insert(binding, Arc::downgrade(&lease));
+		if !start {
+			return lease;
+		}
+		let weak = Arc::downgrade(&group);
 		actors.insert(key.clone(), weak.clone());
 		let actors = self.actors.clone();
 		let permits = self.permits.clone();
-		let cancelled = lease.cancelled.clone();
+		let cancelled = group.cancelled.clone();
 		// Jitter only shortens the interval; it never extends authorization.
 		let mut due = Instant::now() + Duration::from_millis(rand::random_range(4000..=5000));
 		tokio::spawn(async move {
@@ -93,19 +135,46 @@ impl Registry {
 					check().await
 				})
 				.await;
-				if !matches!(result, Ok(Ok(()))) || Instant::now() >= deadline {
-					if let Some(metrics) = &metrics {
-						metrics.substrate_revocation_failed_checks.inc();
-						if Instant::now() >= deadline {
-							metrics.substrate_revocation_overdue_checks.inc();
-						}
+				// Serialize cancellation with registration so a new binding cannot
+				// join a group after its poller decides to stop.
+				let _actors = actors.lock().expect("revocation registry poisoned");
+				let Some(group) = weak.upgrade() else { break };
+				let mut bindings = group.bindings.lock().expect("actor group poisoned");
+				let mut failed = false;
+				bindings.retain(|_, weak| {
+					let Some(lease) = weak.upgrade() else {
+						return false;
+					};
+					if lease.cancelled.is_cancelled() {
+						return false;
 					}
-					if let Some(lease) = weak.upgrade() {
-						*lease.reason.lock().expect("reason poisoned") = match result {
-							Ok(Err(ProxyError::SubstrateEgressConnectDenied(reason))) => reason,
+					let validation = match &result {
+						Ok(Ok(actor)) if Instant::now() < deadline => (lease.validate)(actor),
+						Ok(Err(ProxyError::SubstrateEgressConnectDenied(reason))) => {
+							Err(ProxyError::SubstrateEgressConnectDenied(reason))
+						},
+						_ => Err(ProxyError::SubstrateEgressConnectDenied(
+							"actor-check-failed",
+						)),
+					};
+					if let Err(error) = validation {
+						failed = true;
+						*lease.reason.lock().expect("reason poisoned") = match error {
+							ProxyError::SubstrateEgressConnectDenied(reason) => reason,
 							_ => "actor-check-failed",
 						};
+						lease.cancelled.cancel();
+						return false;
 					}
+					true
+				});
+				if failed && let Some(metrics) = &metrics {
+					metrics.substrate_revocation_failed_checks.inc();
+					if Instant::now() >= deadline {
+						metrics.substrate_revocation_overdue_checks.inc();
+					}
+				}
+				if bindings.is_empty() {
 					cancelled.cancel();
 					break;
 				}
@@ -120,6 +189,28 @@ impl Registry {
 			}
 		});
 		lease
+	}
+	#[cfg(test)]
+	fn register_test<F, Fut>(
+		&self,
+		key: String,
+		metrics: Option<Arc<crate::telemetry::metrics::Metrics>>,
+		check: F,
+	) -> Arc<Lease>
+	where
+		F: Fn() -> Fut + Send + Sync + 'static,
+		Fut: Future<Output = Result<(), ProxyError>> + Send + 'static,
+	{
+		self.register(
+			key,
+			(String::new(), None),
+			metrics,
+			move || {
+				let check = check();
+				async move { check.await.map(|()| Actor::default()) }
+			},
+			|_| Ok(()),
+		)
 	}
 }
 
@@ -304,11 +395,11 @@ mod tests {
 		let registry = Registry::default();
 		let calls = Arc::new(AtomicUsize::new(0));
 		let count = calls.clone();
-		let a = registry.register("actor/run".into(), None, move || {
+		let a = registry.register_test("actor/run".into(), None, move || {
 			count.fetch_add(1, Ordering::Relaxed);
 			async { Ok(()) }
 		});
-		let b = registry.register("actor/run".into(), None, || async {
+		let b = registry.register_test("actor/run".into(), None, || async {
 			panic!("per-tunnel lookup")
 		});
 		assert!(Arc::ptr_eq(&a, &b));
@@ -340,7 +431,7 @@ mod tests {
 			};
 			let calls = Arc::new(AtomicUsize::new(0));
 			let count = calls.clone();
-			let lease = registry.register("actor/run".into(), None, move || {
+			let lease = registry.register_test("actor/run".into(), None, move || {
 				count.fetch_add(1, Ordering::Relaxed);
 				async { std::future::pending().await }
 			});
@@ -356,7 +447,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn missed_schedule_closes_without_starting_a_stale_lookup() {
 		let registry = Registry::default();
-		let lease = registry.register("actor/run".into(), None, || async {
+		let lease = registry.register_test("actor/run".into(), None, || async {
 			panic!("overdue schedule must not start RPC")
 		});
 		tokio::time::advance(Duration::from_secs(10)).await;
@@ -371,7 +462,7 @@ mod tests {
 		for _ in 0..3 {
 			let registry = Registry::default();
 			let calls = calls.clone();
-			leases.push(registry.register("actor/run".into(), None, move || {
+			leases.push(registry.register_test("actor/run".into(), None, move || {
 				calls.fetch_add(1, Ordering::Relaxed);
 				async { Ok(()) }
 			}));
@@ -391,7 +482,7 @@ mod tests {
 				for _ in 0..10 {
 					let calls = calls.clone();
 					leases.push(
-						registry.register(format!("actor-{actor}/run"), None, move || {
+						registry.register_test(format!("actor-{actor}/run"), None, move || {
 							calls.fetch_add(1, Ordering::Relaxed);
 							async { Ok(()) }
 						}),
@@ -421,16 +512,16 @@ mod tests {
 			"actor-check-failed",
 		] {
 			let registry = Registry::default();
-			let old = registry.register("actor/run".into(), None, move || async move {
+			let old = registry.register_test("actor/run".into(), None, move || async move {
 				Err(ProxyError::SubstrateEgressConnectDenied(reason))
 			});
 			tokio::time::sleep(Duration::from_millis(5100)).await;
 			assert!(old.cancelled.is_cancelled());
 			assert_eq!(*old.reason.lock().unwrap(), reason);
-			let new = registry.register("actor/run".into(), None, || async { Ok(()) });
+			let new = registry.register_test("actor/run".into(), None, || async { Ok(()) });
 			assert!(!new.cancelled.is_cancelled());
 			assert!(!Arc::ptr_eq(&old, &new));
-			let replacement = registry.register("actor/new-run".into(), None, || async { Ok(()) });
+			let replacement = registry.register_test("actor/new-run".into(), None, || async { Ok(()) });
 			assert!(!Arc::ptr_eq(&replacement, &new));
 		}
 	}
