@@ -815,7 +815,6 @@ impl Gateway {
 
 					let revocation = actor_identity
 						.as_ref()
-						.filter(|identity| identity.activation_id.is_some())
 						.zip(substrate_egress_actor_resolution.as_ref())
 						.map(|(identity, policy)| policy.monitor(&inputs, identity, authority.as_str()));
 
