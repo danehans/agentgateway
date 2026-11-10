@@ -129,6 +129,176 @@ mod tests {
 
 	use super::*;
 
+	#[derive(Clone)]
+	struct LogWriter(Arc<Mutex<Vec<u8>>>);
+	impl std::io::Write for LogWriter {
+		fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+			self.0.lock().unwrap().extend_from_slice(bytes);
+			Ok(bytes.len())
+		}
+		fn flush(&mut self) -> std::io::Result<()> {
+			Ok(())
+		}
+	}
+
+	#[derive(Clone)]
+	struct ActorView {
+		actor: Arc<Mutex<protos::ateapi::Actor>>,
+		calls: Arc<AtomicUsize>,
+		error: Option<tonic::Code>,
+		delay: Duration,
+	}
+	#[async_trait::async_trait]
+	impl crate::test_helpers::ateapimock::Handler for ActorView {
+		async fn get_actor(
+			&mut self,
+			_: &protos::ateapi::GetActorRequest,
+		) -> Result<protos::ateapi::Actor, tonic::Status> {
+			self.calls.fetch_add(1, Ordering::Relaxed);
+			tokio::time::sleep(self.delay).await;
+			if let Some(error) = self.error {
+				return Err(tonic::Status::new(error, "test failure"));
+			}
+			Ok(self.actor.lock().unwrap().clone())
+		}
+	}
+
+	#[rstest::rstest]
+	#[case::quarantine("quarantine", true, true, "actor-quarantined")]
+	#[case::uid("uid", true, true, "actor-uid-mismatch")]
+	#[case::deleted("deleted", true, true, "actor-check-failed")]
+	#[case::hold("hold", false, false, "")]
+	#[case::activation("activation", false, true, "activation-mismatch")]
+	#[case::outage("outage", true, true, "actor-check-failed")]
+	#[case::slow("slow", true, true, "actor-check-failed")]
+	#[case::overdue("overdue", true, true, "actor-check-failed")]
+	#[tokio::test]
+	async fn mixed_certificate_registry_shares_lookup_and_validates_frozen_bindings(
+		#[case] trigger: &str,
+		#[case] uid_only_closed: bool,
+		#[case] activation_closed: bool,
+		#[case] reason: &str,
+	) {
+		use super::super::egress_actor_resolution::{ActorIdentity, EgressActorResolution};
+		use crate::test_helpers::ateapimock;
+		use crate::test_helpers::proxymock::setup_proxy_test;
+		let actor = Arc::new(Mutex::new(protos::ateapi::Actor {
+			metadata: Some(protos::ateapi::ResourceMetadata {
+				uid: "uid-1".into(),
+				..Default::default()
+			}),
+			status: Some(protos::ateapi::ActorStatus {
+				state: protos::ateapi::ActorState::Running as i32,
+				activation_id: "run-1".into(),
+				..Default::default()
+			}),
+		}));
+		let calls = Arc::new(AtomicUsize::new(0));
+		let handler = ActorView {
+			actor: actor.clone(),
+			calls: calls.clone(),
+			error: match trigger {
+				"deleted" => Some(tonic::Code::NotFound),
+				"outage" => Some(tonic::Code::Unavailable),
+				_ => None,
+			},
+			delay: if trigger == "slow" {
+				Duration::from_secs(3)
+			} else {
+				Duration::ZERO
+			},
+		};
+		let api = ateapimock::AteApiMock::new(move || handler.clone())
+			.spawn()
+			.await;
+		let gateway = setup_proxy_test("{}").unwrap();
+		let inputs = gateway.inputs();
+		let policy: EgressActorResolution =
+			serde_json::from_value(serde_json::json!({"host": api.address.to_string()})).unwrap();
+		let mut identity = ActorIdentity {
+			atespace: "demo".into(),
+			actor_name: "my-actor".into(),
+			actor_uid: Some("uid-1".into()),
+			activation_id: Some("run-1".into()),
+		};
+		let bound = policy.monitor(&inputs, &identity, "192.0.2.1:443");
+		identity.activation_id = None;
+		let uid_only = policy.monitor(&inputs, &identity, "192.0.2.2:443");
+		let another = policy.monitor(&inputs, &identity, "192.0.2.3:443");
+		assert!(Arc::ptr_eq(&uid_only, &another));
+		assert_eq!(
+			inputs.substrate_revocations.actors.lock().unwrap().len(),
+			1,
+			"one actor poll group for mixed certificates"
+		);
+		{
+			let mut actor = actor.lock().unwrap();
+			let status = actor.status.as_mut().unwrap();
+			match trigger {
+				"quarantine" => status.quarantine = Some(protos::ateapi::ActorQuarantine {}),
+				"uid" => {
+					status.quarantine = Some(protos::ateapi::ActorQuarantine {});
+					actor.metadata.as_mut().unwrap().uid = "uid-2".into();
+				},
+				"hold" => status.holds.push(protos::ateapi::ActorHold {}),
+				"activation" => status.activation_id = "run-2".into(),
+				_ => {},
+			}
+		}
+		let _permits = if trigger == "overdue" {
+			Some(
+				inputs
+					.substrate_revocations
+					.permits
+					.clone()
+					.acquire_many_owned(64)
+					.await
+					.unwrap(),
+			)
+		} else {
+			None
+		};
+		tokio::time::sleep(Duration::from_millis(7200)).await;
+		assert_eq!(
+			calls.load(Ordering::Relaxed),
+			usize::from(trigger != "overdue"),
+			"one GetActor per poll"
+		);
+		assert_eq!(uid_only.cancelled.is_cancelled(), uid_only_closed);
+		assert_eq!(bound.cancelled.is_cancelled(), activation_closed);
+		if activation_closed {
+			assert_eq!(*bound.reason.lock().unwrap(), reason);
+		}
+		if uid_only_closed {
+			assert_eq!(*uid_only.reason.lock().unwrap(), reason);
+		}
+		let logs = Arc::new(Mutex::new(Vec::new()));
+		let writer = LogWriter(logs.clone());
+		let subscriber = tracing_subscriber::fmt()
+			.json()
+			.with_env_filter("off,agentgateway::substrate::connect_revocation=warn")
+			.with_writer(move || writer.clone())
+			.finish();
+		if uid_only_closed {
+			tracing::subscriber::with_default(subscriber, || {
+				crate::proxy::log_revocation(
+					&uid_only,
+					Some(&identity),
+					&"192.0.2.2:443".parse().unwrap(),
+				);
+			});
+			let bytes = logs.lock().unwrap();
+			let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+			assert_eq!(
+				event["target"],
+				"agentgateway::substrate::connect_revocation"
+			);
+			assert_eq!(event["fields"]["reason_code"], reason);
+			assert_eq!(event["fields"]["activation_id"], "");
+			assert_eq!(event["fields"]["actor_uid"], "uid-1");
+		}
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn tunnels_share_one_check_and_last_drop_stops_polling() {
 		let registry = Registry::default();
