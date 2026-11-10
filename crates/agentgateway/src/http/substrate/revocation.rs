@@ -125,8 +125,9 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	use super::*;
 
 	#[tokio::test(start_paused = true)]
 	async fn tunnels_share_one_check_and_last_drop_stops_polling() {
@@ -311,9 +312,11 @@ impl Drop for TunnelMetrics {
 
 #[cfg(test)]
 mod executor_tests {
-	use super::*;
-	use hyper::rt::Executor as _;
 	use std::sync::atomic::{AtomicBool, Ordering};
+
+	use hyper::rt::Executor as _;
+
+	use super::*;
 	struct Dropped(Arc<AtomicBool>);
 	impl Drop for Dropped {
 		fn drop(&mut self) {
