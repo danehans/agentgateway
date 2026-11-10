@@ -1836,7 +1836,7 @@ async fn peek_auto_protocol<R: tokio::io::AsyncRead + Unpin>(
 	Ok(total)
 }
 
-fn log_revocation(
+pub(crate) fn log_revocation(
 	lease: &substrate::revocation::Lease,
 	identity: Option<&ActorIdentity>,
 	authority: &::http::uri::Authority,

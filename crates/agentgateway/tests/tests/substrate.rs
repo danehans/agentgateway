@@ -4138,6 +4138,205 @@ async fn substrate_revocation_closes_running_actor_tunnels(
 	q6_http_request(&mut reopened, "released", port).await;
 }
 
+#[rstest::rstest]
+#[case::quarantine("quarantine")]
+#[case::uid_replaced("uid")]
+#[case::ordinary_hold("hold")]
+#[case::activation_changed("activation")]
+#[case::deleted("deleted")]
+#[case::failed_check("outage")]
+#[case::late_check("slow")]
+#[tokio::test]
+async fn substrate_revocation_without_activation(#[case] trigger: &str) {
+	let view = Arc::new(Mutex::new(EgressHandler {
+		uid: "uid-1",
+		activation_id: "run-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	}));
+	let calls = Arc::new(AtomicUsize::new(0));
+	let delay_ms = Arc::new(AtomicUsize::new(0));
+	let upstream = simple_mock().await;
+	let port = upstream.address().port();
+	let handler = RevocationHandler {
+		policy: Some(q6_http_policy(port)),
+		view: view.clone(),
+		calls: calls.clone(),
+		delay_ms: delay_ms.clone(),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+	let gateway = q6_http_gateway(api.address, port).await;
+	let certificate = actor_certificate_with_identity(
+		"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+		Some("uid-1"),
+		None,
+	);
+	let mut tunnels = Vec::new();
+	for _ in 0..2 {
+		let mut io = open_q6_tcp_tunnel(&gateway, &certificate, port).await;
+		q6_http_request(&mut io, "before", port).await;
+		tunnels.push(io);
+	}
+	assert_eq!(calls.load(Ordering::Relaxed), 2);
+	match trigger {
+		"quarantine" => view.lock().unwrap().quarantine = true,
+		"uid" => view.lock().unwrap().uid = "uid-2",
+		"hold" => {
+			let mut actor = view.lock().unwrap();
+			actor.held = true;
+		},
+		"activation" => view.lock().unwrap().activation_id = "run-2",
+		"deleted" => view.lock().unwrap().error = Some(tonic::Code::NotFound),
+		"outage" => view.lock().unwrap().error = Some(tonic::Code::Unavailable),
+		"slow" => delay_ms.store(3000, Ordering::Relaxed),
+		_ => unreachable!(),
+	}
+	if matches!(trigger, "hold" | "activation") {
+		tokio::time::sleep(Duration::from_millis(5200)).await;
+		for io in &mut tunnels {
+			q6_http_request(io, "held-with-new-activation", port).await;
+		}
+		assert_eq!(
+			calls.load(Ordering::Relaxed),
+			3,
+			"one continuing actor lookup"
+		);
+	} else {
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+		for io in &mut tunnels {
+			let mut b = [0; 1];
+			let closed = tokio::time::timeout_at(deadline, io.read(&mut b))
+				.await
+				.expect("certificate without activation exceeded close budget");
+			assert!(
+				matches!(closed, Ok(0) | Err(_)),
+				"revoked tunnel passed bytes"
+			);
+		}
+		assert_eq!(
+			calls.load(Ordering::Relaxed),
+			3,
+			"one shared revocation lookup"
+		);
+	}
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn substrate_revocation_mixed_activation_certificates_share_actor_lookup(
+	#[values(false, true)] rotate: bool,
+) {
+	let view = Arc::new(Mutex::new(EgressHandler {
+		uid: "uid-1",
+		activation_id: "run-1",
+		state: Some(ActorState::Running as i32),
+		..Default::default()
+	}));
+	let calls = Arc::new(AtomicUsize::new(0));
+	let upstream = simple_mock().await;
+	let port = upstream.address().port();
+	let handler = RevocationHandler {
+		policy: Some(q6_http_policy(port)),
+		view: view.clone(),
+		calls: calls.clone(),
+		delay_ms: Arc::new(AtomicUsize::new(0)),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+	let gateway = q6_http_gateway(api.address, port).await;
+	let mut tunnels = Vec::new();
+	for activation in [Some("run-1"), None, None] {
+		let certificate = actor_certificate_with_identity(
+			"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+			Some("uid-1"),
+			activation,
+		);
+		let mut io = open_q6_tcp_tunnel(&gateway, &certificate, port).await;
+		q6_http_request(&mut io, "before", port).await;
+		tunnels.push(io);
+	}
+	assert_eq!(calls.load(Ordering::Relaxed), 3);
+	{
+		let mut actor = view.lock().unwrap();
+		actor.held = true;
+		if rotate {
+			actor.activation_id = "run-2";
+		}
+	}
+	if rotate {
+		let mut activation_tunnel = tunnels.remove(0);
+		let mut b = [0; 1];
+		let closed = tokio::time::timeout(Duration::from_secs(8), activation_tunnel.read(&mut b))
+			.await
+			.expect("activation-bound tunnel must close on rotation");
+		assert!(matches!(closed, Ok(0) | Err(_)));
+		// Cross two poll intervals after rotating the activation. Only the certified
+		// activation expires; UID-only handles keep the same actor poll alive.
+		tokio::time::sleep(Duration::from_millis(10200)).await;
+		assert_eq!(
+			calls.load(Ordering::Relaxed),
+			6,
+			"one poll per actor, including UID-only tunnels"
+		);
+		for io in &mut tunnels {
+			q6_http_request(io, "uid-only-after-rotation", port).await;
+		}
+		let certificate = actor_certificate_with_identity(
+			"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+			Some("uid-1"),
+			Some("run-2"),
+		);
+		let mut replacement = open_q6_tcp_tunnel(&gateway, &certificate, port).await;
+		q6_http_request(&mut replacement, "new-activation", port).await;
+		tunnels.push(replacement);
+		assert_eq!(
+			calls.load(Ordering::Relaxed),
+			7,
+			"one new CONNECT admission"
+		);
+	} else {
+		tokio::time::sleep(Duration::from_millis(5200)).await;
+		assert_eq!(calls.load(Ordering::Relaxed), 4, "one mixed actor poll");
+		for io in &mut tunnels {
+			q6_http_request(io, "held", port).await;
+		}
+	}
+	view.lock().unwrap().quarantine = true;
+	let mut b = [0; 1];
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+	for io in &mut tunnels {
+		let closed = tokio::time::timeout_at(deadline, io.read(&mut b))
+			.await
+			.expect("mixed tunnel must close on quarantine");
+		assert!(matches!(closed, Ok(0) | Err(_)));
+	}
+	assert_eq!(
+		calls.load(Ordering::Relaxed),
+		if rotate { 8 } else { 5 },
+		"one mixed quarantine poll"
+	);
+}
+
+fn q6_http_policy(port: u16) -> EgressPolicy {
+	EgressPolicy {
+		rules: vec![protos::ateapi::EgressRule {
+			http: Some(protos::ateapi::HttpRule {
+				hostnames: vec!["localhost".to_owned()],
+				ports: Some(protos::ateapi::Ports {
+					numbers: vec![i32::from(port)],
+					..Default::default()
+				}),
+				effects: None,
+			}),
+			..Default::default()
+		}],
+		..Default::default()
+	}
+}
+
 #[cfg(feature = "crypto-aws-lc")]
 #[rstest::rstest]
 #[case::passthrough(true)]
