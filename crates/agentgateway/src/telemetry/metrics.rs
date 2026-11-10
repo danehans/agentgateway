@@ -475,7 +475,7 @@ impl Metrics {
 				let m = Gauge::default();
 				registry.register(
 					"substrate_revocation_actors_active",
-					"Certified executions with live revocable tunnels",
+					"Certificate bindings with live revocable tunnels",
 					m.clone(),
 				);
 				m
