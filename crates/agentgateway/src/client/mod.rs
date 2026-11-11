@@ -232,6 +232,9 @@ pub struct ConnectionConfig {
 	pub max_connection_duration: Option<Duration>,
 	/// The backend this connection serves. Part of the pool key, so backends do not share connections.
 	pub backend: Option<Strng>,
+	/// The Substrate execution this connection serves. Part of the pool key, so
+	/// executions do not share connections, and the connection ends with it.
+	pub execution: Option<crate::http::substrate::revocation::ExecutionScope>,
 }
 
 impl From<Transport> for ConnectionConfig {
@@ -241,6 +244,7 @@ impl From<Transport> for ConnectionConfig {
 			tcp: None,
 			max_connection_duration: None,
 			backend: None,
+			execution: None,
 		}
 	}
 }
@@ -347,6 +351,7 @@ impl Connector {
 			tcp,
 			max_connection_duration,
 			backend,
+			execution,
 		} = connection;
 		let connect_start = std::time::Instant::now();
 		let transport_name = transport.name();
@@ -496,6 +501,10 @@ impl Connector {
 			socket
 				.ext_mut()
 				.insert(Arc::new(metrics::GaugeGuard::new(gauge)));
+		}
+
+		if let Some(execution) = execution {
+			socket.close_when(execution.cancelled().clone());
 		}
 
 		socket.with_logging(LoggingMode::Upstream);
@@ -672,6 +681,7 @@ impl Client {
 					tcp,
 					max_connection_duration: None,
 					backend: None,
+					execution: None,
 				},
 				dynamic_backend: false,
 			})
@@ -990,6 +1000,7 @@ mod tests {
 					tcp: None,
 					max_connection_duration: Some(max_age),
 					backend: None,
+					execution: None,
 				},
 			)
 			.await

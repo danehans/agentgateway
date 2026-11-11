@@ -840,7 +840,10 @@ impl Gateway {
 							},
 						};
 						let mut downstream = Socket::from_upgraded(connection, target_address, downstream);
-						if let Some(lease) = revocation.as_ref() { downstream.ext_mut().insert(lease.cancelled.clone()); }
+						if let Some(lease) = revocation.as_ref() {
+							downstream.ext_mut().insert(lease.cancelled.clone());
+							downstream.ext_mut().insert(lease.scope.clone());
+						}
 						if let Some(identity) = actor_identity {
 							downstream.ext_mut().insert(identity);
 						}
