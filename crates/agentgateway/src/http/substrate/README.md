@@ -116,5 +116,23 @@ certificates carrying the old activation close on rotation; quarantine closes
 both kinds. Their `connect_revocation` events keep `activation_id` empty when
 the certificate carries none. Gateway closure does not cancel work already
 accepted upstream.
+
+Pooled upstream connections for actor HTTP and intercepted HTTPS requests belong
+to one certificate binding on one replica. That binding is part of the backend
+pool key, so two actors, or the same actor's tunnels with and without an
+activation, never share an upstream connection. Tunnels of one binding do share
+them. The connections end when the binding is revoked, with the same checks and
+budget as its tunnels, or when its last tunnel on that replica closes; they do
+not wait for the pool's idle timeout. A later tunnel opens new connections.
+Requests the gateway makes for itself, such as policy callouts, and all
+non-Substrate traffic keep the shared pool.
+
+This costs upstream connections: one set per live certificate binding per
+destination on each replica, where every actor otherwise shares one set. Set
+`upstreamConnections: shared` on `substrateEgressActorResolution` to keep the
+shared pool instead; the default is `perExecution`. With `shared`, revocation
+still closes the actor's tunnels, resets its in-flight requests and refuses new
+ones, but a pooled upstream connection stays open until the pool's idle timeout
+and may be serving other actors, so the origin does not see it end.
 The 8-second design budget (5-second interval, 2-second RPC, 1-second close)
 is not a qualified deployment-wide latency guarantee.

@@ -1660,6 +1660,7 @@
 |`frontendPolicies.substrateEgressActorResolution.host`|string|Hostname or IP address|
 |`frontendPolicies.substrateEgressActorResolution.backend`|string|Explicit backend reference. Backend must be defined in the top level backends list|
 |`frontendPolicies.substrateEgressActorResolution.policies`|[`<BackendPolicies>`](#backendpolicies)|Backend policies used when connecting to the service.|
+|`frontendPolicies.substrateEgressActorResolution.upstreamConnections`|enum|How upstream connections for actor requests are pooled. Defaults to<br>`perExecution`.<br>Possible values: `perExecution`, `shared`.|
 |`frontendPolicies.proxy`|object|Enable downstream PROXY protocol handling on this gateway or port, including<br>version matching and whether PROXY headers are required or optional.|
 |`frontendPolicies.proxy.version`|enum|PROXY protocol versions accepted from downstream clients.<br>Possible values: `v1`, `v2`, `all`.|
 |`frontendPolicies.proxy.mode`|enum|Whether downstream connections must include a PROXY protocol header.<br>Possible values: `strict`, `optional`.|

@@ -757,6 +757,7 @@ impl HTTPProxy {
 			.expect("tcp connection must be set")
 			.clone();
 		connection.copy::<TLSConnectionInfo>(req.extensions_mut());
+		connection.copy::<crate::http::substrate::revocation::ExecutionScope>(req.extensions_mut());
 		if connection
 			.copy::<ActorIdentity>(req.extensions_mut())
 			.is_some()
@@ -1432,6 +1433,7 @@ impl HTTPProxy {
 					tcp: backend_call.backend_policies.tcp.clone(),
 					max_connection_duration: None,
 					backend: Some(selected_backend.backend.backend.name()),
+					execution: None,
 				},
 			)
 			.await?;
@@ -2001,6 +2003,7 @@ pub async fn build_transport(
 				tcp: call.backend_policies.tcp.clone(),
 				max_connection_duration: None,
 				backend: None,
+				execution: None,
 			}),
 			target: call.target.clone(),
 			token,
@@ -3222,6 +3225,15 @@ async fn make_backend_call(
 			.callout_transport(transport, &backend_call.target);
 	}
 	dtrace::snapshot!(Request, "final request", &req);
+	// A callout is the gateway's own request, not the actor's.
+	let execution = (!callout)
+		.then(|| {
+			req
+				.extensions()
+				.get::<crate::http::substrate::revocation::ExecutionScope>()
+				.cloned()
+		})
+		.flatten();
 	let request_body_limit = crate::http::buffer_limit(&req);
 	let req = req.map(|b| dtrace::TracingBody::maybe_wrap("final request", b, request_body_limit));
 	let mut call = client::Call {
@@ -3236,6 +3248,7 @@ async fn make_backend_call(
 				.as_ref()
 				.and_then(|h| h.max_connection_duration),
 			backend: Some(backend.name()),
+			execution,
 		},
 		dynamic_backend: matches!(backend, Backend::Dynamic(_, _)),
 	};

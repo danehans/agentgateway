@@ -11148,6 +11148,11 @@
               "type": "null"
             }
           ]
+        },
+        "upstreamConnections": {
+          "description": "How upstream connections for actor requests are pooled. Defaults to\n`perExecution`.",
+          "$ref": "#/$defs/UpstreamConnections",
+          "default": "perExecution"
         }
       },
       "unevaluatedProperties": false,
@@ -11206,6 +11211,21 @@
           "required": [
             "backend"
           ]
+        }
+      ]
+    },
+    "UpstreamConnections": {
+      "description": "How the gateway pools its upstream connections for actor requests.",
+      "oneOf": [
+        {
+          "description": "Each certificate binding has its own upstream connections. They end when\nthe binding's tunnels are revoked or its last tunnel closes.",
+          "type": "string",
+          "const": "perExecution"
+        },
+        {
+          "description": "Actors share pooled upstream connections. Revocation still closes the\nactor's tunnels, but a pooled upstream connection stays open until the\npool's idle timeout and may serve other actors.",
+          "type": "string",
+          "const": "shared"
         }
       ]
     },

@@ -117,6 +117,9 @@ pub struct Socket {
 	ext: Extension,
 	inner: SocketType,
 	metrics: Metrics,
+	/// When set and cancelled, every read and write fails, so whoever drives
+	/// this socket drops it and the peer observes the close.
+	closed: Option<Pin<Box<tokio_util::sync::WaitForCancellationFutureOwned>>>,
 }
 
 impl Connection for Socket {
@@ -168,6 +171,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Rewind(Box::new(socket)),
 			metrics,
+			closed: None,
 		}
 	}
 
@@ -176,7 +180,25 @@ impl Socket {
 			ext,
 			inner: socket,
 			metrics,
+			closed: None,
 		}
+	}
+
+	/// Fail all further I/O on this socket once `token` is cancelled.
+	pub(crate) fn close_when(&mut self, token: tokio_util::sync::CancellationToken) {
+		self.closed = Some(Box::pin(token.cancelled_owned()));
+	}
+
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+		let Some(closed) = self.closed.as_mut() else {
+			return Poll::Pending;
+		};
+		closed.as_mut().poll(cx).map(|()| {
+			Err(Error::new(
+				std::io::ErrorKind::ConnectionAborted,
+				"connection authorization ended",
+			))
+		})
 	}
 
 	pub fn set_transport_metrics(
@@ -194,6 +216,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Memory(stream),
 			metrics: Metrics::with_counter(),
+			closed: None,
 		}
 	}
 
@@ -210,6 +233,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Tcp(stream),
 			metrics: Metrics::with_counter(),
+			closed: None,
 		})
 	}
 
@@ -259,6 +283,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Tls(Box::new(tls)),
 			metrics,
+			closed: None,
 		})
 	}
 
@@ -282,6 +307,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Hbone(hbone),
 			metrics: Metrics::with_counter(),
+			closed: None,
 		}
 	}
 
@@ -302,6 +328,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Upgraded(TokioIo::new(upgraded)),
 			metrics: Metrics::with_counter(),
+			closed: None,
 		}
 	}
 
@@ -356,6 +383,7 @@ impl Socket {
 			ext,
 			inner: SocketType::Unix(stream),
 			metrics: Metrics::with_counter(),
+			closed: None,
 		})
 	}
 
@@ -510,6 +538,9 @@ impl AsyncRead for Socket {
 		cx: &mut Context<'_>,
 		buf: &mut ReadBuf<'_>,
 	) -> Poll<std::io::Result<()>> {
+		if let Poll::Ready(Err(error)) = self.poll_closed(cx) {
+			return Poll::Ready(Err(error));
+		}
 		let bytes = buf.filled().len();
 		let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
 		let bytes = buf.filled().len() - bytes;
@@ -525,6 +556,9 @@ impl AsyncWrite for Socket {
 		cx: &mut Context<'_>,
 		buf: &[u8],
 	) -> Poll<Result<usize, Error>> {
+		if let Poll::Ready(Err(error)) = self.poll_closed(cx) {
+			return Poll::Ready(Err(error));
+		}
 		let poll = Pin::new(&mut self.inner).poll_write(cx, buf);
 		if let Some(c) = &mut self.metrics.counter
 			&& let Poll::Ready(Ok(bytes)) = poll
@@ -547,6 +581,9 @@ impl AsyncWrite for Socket {
 		cx: &mut Context<'_>,
 		bufs: &[IoSlice<'_>],
 	) -> Poll<Result<usize, Error>> {
+		if let Poll::Ready(Err(error)) = self.poll_closed(cx) {
+			return Poll::Ready(Err(error));
+		}
 		let poll = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
 		if let Some(c) = &mut self.metrics.counter
 			&& let Poll::Ready(Ok(bytes)) = poll
@@ -705,5 +742,47 @@ impl Drop for Metrics {
 				);
 			},
 		}
+	}
+}
+
+#[cfg(test)]
+mod close_when_tests {
+	use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+	use super::*;
+
+	fn info() -> TCPConnectionInfo {
+		let address = SocketAddr::from(([127, 0, 0, 1], 1));
+		TCPConnectionInfo {
+			peer_addr: address,
+			local_addr: address,
+			start: Instant::now(),
+			raw_peer_addr: None,
+		}
+	}
+
+	#[tokio::test]
+	async fn cancelled_token_fails_pending_and_later_io() {
+		let (near, mut far) = tokio::io::duplex(64);
+		let mut socket = Socket::from_memory(near, info());
+		let token = tokio_util::sync::CancellationToken::new();
+		socket.close_when(token.clone());
+		far.write_all(b"a").await.unwrap();
+		let mut byte = [0; 1];
+		socket.read_exact(&mut byte).await.unwrap();
+
+		let pending = tokio::spawn(async move {
+			let read = socket.read(&mut byte).await;
+			let write = socket.write(b"b").await;
+			(read, write)
+		});
+		tokio::task::yield_now().await;
+		assert!(!pending.is_finished(), "read must wait for data");
+		token.cancel();
+		let (read, write) = pending.await.unwrap();
+		assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+		assert_eq!(write.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+		// Dropping the socket is what the peer observes.
+		assert_eq!(far.read(&mut [0; 1]).await.unwrap(), 0);
 	}
 }
