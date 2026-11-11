@@ -2587,7 +2587,7 @@ async fn substrate_tls_gateway(
 	})
 	.spawn()
 	.await;
-	let gateway = substrate_tls_gateway_with_api(api.address, upstream, root).await;
+	let gateway = substrate_tls_gateway_with_api(api.address, upstream, root, None).await;
 	(gateway, api)
 }
 
@@ -2595,6 +2595,7 @@ async fn substrate_tls_gateway_with_api(
 	api: std::net::SocketAddr,
 	upstream: std::net::SocketAddr,
 	root: Option<Vec<u8>>,
+	upstream_connections: Option<&str>,
 ) -> TestBind {
 	let mut outer = simple_bind();
 	outer.key = strng::literal!("outer");
@@ -2668,9 +2669,13 @@ async fn substrate_tls_gateway_with_api(
 		.with_tcp_route_for_listener(tls_listener, tls_route)
 		.with_tcp_route_for_listener(tcp_listener, tcp_route)
 		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15013);
+	let mut resolution = json!({ "host": api.to_string() });
+	if let Some(mode) = upstream_connections {
+		resolution["upstreamConnections"] = mode.into();
+	}
 	gateway
 		.attach_frontend_policy(json!({
-				"substrateEgressActorResolution": { "host": api.to_string() },
+				"substrateEgressActorResolution": resolution,
 				"tls": { "handshakeTimeout": "1s" }
 		}))
 		.await;
@@ -4929,17 +4934,20 @@ impl InterceptedTunnel {
 	}
 }
 
-// The origin, not the actor, decides whether an intercepted connection ended.
-// Each certificate-bound execution owns its upstream connections: they end
-// with its authorization or its last tunnel, and never serve another execution.
 #[cfg(feature = "crypto-aws-lc")]
-#[rstest::rstest]
-#[case::quarantine("quarantine")]
-#[case::activation("activation")]
-#[case::hold("hold")]
-#[case::last_tunnel("last-tunnel")]
-#[tokio::test]
-async fn substrate_upstream_connections_follow_the_execution(#[case] trigger: &str) {
+type ScopedActorViews = Arc<Mutex<std::collections::HashMap<&'static str, EgressHandler>>>;
+
+/// Two running actors that may reach one recording origin over intercepted HTTPS.
+#[cfg(feature = "crypto-aws-lc")]
+async fn scoped_upstream_fixture(
+	setting: Option<&str>,
+) -> (
+	RecordingOrigin,
+	SocketAddr,
+	TestBind,
+	ScopedActorViews,
+	agentgateway::test_helpers::MockInstance,
+) {
 	let (_unused, certs) = tls_mock().await;
 	let (origin, address) = RecordingOrigin::spawn(&certs).await;
 	let port = address.port();
@@ -4986,8 +4994,30 @@ async fn substrate_upstream_connections_follow_the_execution(#[case] trigger: &s
 		api.address,
 		address,
 		Some(certs.root_cert.pem().into_bytes()),
+		setting,
 	)
 	.await;
+	// The caller keeps the control API alive for the continuing actor checks.
+	(origin, address, gateway, actors, api)
+}
+
+// The origin, not the actor, decides whether an intercepted connection ended.
+// Each certificate-bound execution owns its upstream connections: they end
+// with its authorization or its last tunnel, and never serve another execution.
+#[cfg(feature = "crypto-aws-lc")]
+#[rstest::rstest]
+#[case::quarantine("quarantine", None)]
+#[case::explicit("quarantine", Some("perExecution"))]
+#[case::activation("activation", None)]
+#[case::hold("hold", None)]
+#[case::last_tunnel("last-tunnel", None)]
+#[tokio::test]
+async fn substrate_upstream_connections_follow_the_execution(
+	#[case] trigger: &str,
+	#[case] setting: Option<&str>,
+) {
+	let (origin, address, gateway, actors, _api) = scoped_upstream_fixture(setting).await;
+	let port = address.port();
 
 	let mut bound = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", Some("run-1")).await;
 	let mut second =
@@ -5090,4 +5120,42 @@ async fn substrate_upstream_connections_follow_the_execution(#[case] trigger: &s
 		origin.opened(),
 		if trigger == "last-tunnel" { 4 } else { 3 }
 	);
+}
+
+// The opt-out keeps one pool for every actor. Revocation still cuts the
+// actor's tunnels, but the pooled upstream connection is not the actor's to
+// lose: it stays open and keeps serving others.
+#[cfg(feature = "crypto-aws-lc")]
+#[tokio::test]
+async fn substrate_shared_upstream_connections_outlive_revocation() {
+	let (origin, address, gateway, actors, _api) = scoped_upstream_fixture(Some("shared")).await;
+	let port = address.port();
+	let mut bound = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", Some("run-1")).await;
+	let mut uid_only = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", None).await;
+	let mut other =
+		InterceptedTunnel::open(&gateway, port, "other-actor", "uid-2", Some("run-9")).await;
+	let shared = bound.pooled().await;
+	assert_eq!(uid_only.pooled().await, shared);
+	assert_eq!(other.pooled().await, shared);
+	assert_eq!(origin.opened(), 1);
+
+	actors
+		.lock()
+		.unwrap()
+		.get_mut("my-actor")
+		.unwrap()
+		.quarantine = true;
+	tokio::time::timeout(Duration::from_secs(8), async {
+		while bound.request().await.is_some() || uid_only.request().await.is_some() {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("quarantine left the actor's tunnels open");
+	assert!(
+		!origin.ended(shared),
+		"shared upstream ended with one actor"
+	);
+	assert_eq!(other.request().await, Some(shared));
+	assert_eq!(origin.opened(), 1);
 }
