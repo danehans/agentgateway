@@ -70,12 +70,30 @@ where
 	String::deserialize(deserializer).map(Some)
 }
 
+/// How the gateway pools its upstream connections for actor requests.
+#[apply(schema_enum!)]
+#[derive(Default)]
+pub enum UpstreamConnections {
+	/// Each certificate binding has its own upstream connections. They end when
+	/// the binding's tunnels are revoked or its last tunnel closes.
+	#[default]
+	PerExecution,
+	/// Actors share pooled upstream connections. Revocation still closes the
+	/// actor's tunnels, but a pooled upstream connection stays open until the
+	/// pool's idle timeout and may serve other actors.
+	Shared,
+}
+
 /// Validates an actor's identity before accepting a CONNECT tunnel.
 #[apply(schema!)]
 pub struct EgressActorResolution {
 	/// Backend that receives GetActor calls and policies used when connecting to it.
 	#[serde(flatten)]
 	pub target: SimpleBackendReferenceWithPolicies,
+	/// How upstream connections for actor requests are pooled. Defaults to
+	/// `perExecution`.
+	#[serde(default)]
+	pub upstream_connections: UpstreamConnections,
 }
 
 impl EgressActorResolution {

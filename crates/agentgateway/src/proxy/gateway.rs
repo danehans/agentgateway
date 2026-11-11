@@ -818,6 +818,9 @@ impl Gateway {
 						.zip(substrate_egress_actor_resolution.as_ref())
 						.map(|(identity, policy)| policy.monitor(&inputs, identity, authority.as_str()));
 
+					let scope_upstream = substrate_egress_actor_resolution.as_ref().is_some_and(|policy| {
+						policy.upstream_connections == substrate::UpstreamConnections::PerExecution
+					});
 					let tunnel_metrics = revocation.as_ref().map(|_| substrate::revocation::TunnelMetrics::new(inputs.metrics.clone()));
 					let close_identity = actor_identity.clone();
 					let close_authority = authority.clone();
@@ -842,7 +845,10 @@ impl Gateway {
 						let mut downstream = Socket::from_upgraded(connection, target_address, downstream);
 						if let Some(lease) = revocation.as_ref() {
 							downstream.ext_mut().insert(lease.cancelled.clone());
-							downstream.ext_mut().insert(lease.scope.clone());
+							// Without a scope, requests use the pool shared by every actor.
+							if scope_upstream {
+								downstream.ext_mut().insert(lease.scope.clone());
+							}
 						}
 						if let Some(identity) = actor_identity {
 							downstream.ext_mut().insert(identity);
