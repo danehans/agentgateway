@@ -1668,6 +1668,15 @@ fn actor_certificate_with_identity(
 	uid: Option<&str>,
 	activation_id: Option<&str>,
 ) -> String {
+	actor_certificate_for("my-actor", uri, uid, activation_id)
+}
+
+fn actor_certificate_for(
+	actor_name: &str,
+	uri: &str,
+	uid: Option<&str>,
+	activation_id: Option<&str>,
+) -> String {
 	let mut params = rcgen::CertificateParams::default();
 	params
 		.subject_alt_names
@@ -1675,7 +1684,7 @@ fn actor_certificate_with_identity(
 	if let Some(uid) = uid {
 		let mut identity = serde_json::json!({
 			"Atespace": "demo",
-			"ActorName": "my-actor",
+			"ActorName": actor_name,
 			"ActorUid": uid,
 		});
 		if let Some(activation_id) = activation_id {
@@ -2578,6 +2587,15 @@ async fn substrate_tls_gateway(
 	})
 	.spawn()
 	.await;
+	let gateway = substrate_tls_gateway_with_api(api.address, upstream, root).await;
+	(gateway, api)
+}
+
+async fn substrate_tls_gateway_with_api(
+	api: std::net::SocketAddr,
+	upstream: std::net::SocketAddr,
+	root: Option<Vec<u8>>,
+) -> TestBind {
 	let mut outer = simple_bind();
 	outer.key = strng::literal!("outer");
 	outer.address = "127.0.0.1:15013".parse().unwrap();
@@ -2652,14 +2670,14 @@ async fn substrate_tls_gateway(
 		.with_connect_mode_on_port(agentgateway::types::frontend::ConnectMode::Tunnel, 15013);
 	gateway
 		.attach_frontend_policy(json!({
-				"substrateEgressActorResolution": { "host": api.address.to_string() },
+				"substrateEgressActorResolution": { "host": api.to_string() },
 				"tls": { "handshakeTimeout": "1s" }
 		}))
 		.await;
 	gateway
-		.attach_route_policy(json!({ "substrateEgress": { "host": api.address.to_string() } }))
+		.attach_route_policy(json!({ "substrateEgress": { "host": api.to_string() } }))
 		.await;
-	(gateway, api)
+	gateway
 }
 
 #[cfg(feature = "crypto-aws-lc")]
@@ -4705,4 +4723,371 @@ async fn substrate_revocation_gateway_runtime_loss_closes_tunnel() {
 		.expect("gateway runtime loss left tunnel open");
 	assert!(matches!(result, Ok(0) | Err(_)));
 	thread.join().unwrap();
+}
+
+/// An HTTP/2 TLS origin that reports which connection served a request and
+/// when each connection ended, independently of any client's account.
+#[cfg(feature = "crypto-aws-lc")]
+#[derive(Clone, Default)]
+struct RecordingOrigin(Arc<Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>);
+
+#[cfg(feature = "crypto-aws-lc")]
+impl RecordingOrigin {
+	async fn spawn(certs: &wiremock::tls_certs::MockTlsCertificates) -> (Self, SocketAddr) {
+		struct Ended(Arc<std::sync::atomic::AtomicBool>);
+		impl Drop for Ended {
+			fn drop(&mut self) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+		let mut config =
+			rustls::ServerConfig::builder_with_provider(agentgateway::transport::tls::provider())
+				.with_protocol_versions(agentgateway::transport::tls::ALL_TLS_VERSIONS)
+				.unwrap()
+				.with_no_client_auth()
+				.with_single_cert(
+					vec![certs.server_cert_der().clone().into_owned()],
+					certs.server_private_keypair_der().clone_key(),
+				)
+				.unwrap();
+		config.alpn_protocols = vec![b"h2".to_vec()];
+		let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let origin = Self::default();
+		let connections = origin.0.clone();
+		tokio::spawn(async move {
+			while let Ok((socket, _)) = listener.accept().await {
+				let acceptor = acceptor.clone();
+				let connections = connections.clone();
+				tokio::spawn(async move {
+					let Ok(socket) = acceptor.accept(socket).await else {
+						return;
+					};
+					let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+					let id = {
+						let mut connections = connections.lock().unwrap();
+						connections.push(ended.clone());
+						connections.len() - 1
+					};
+					let _ended = Ended(ended);
+					let service = service_fn(
+						move |_: ::http::Request<hyper::body::Incoming>| async move {
+							Ok::<_, Infallible>(
+								::http::Response::builder()
+									.header("x-origin-connection", id.to_string())
+									.body(http_body_util::Full::new(bytes::Bytes::from_static(b"ok")))
+									.unwrap(),
+							)
+						},
+					);
+					let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+						.serve_connection(TokioIo::new(socket), service)
+						.await;
+				});
+			}
+		});
+		(origin, address)
+	}
+
+	fn opened(&self) -> usize {
+		self.0.lock().unwrap().len()
+	}
+
+	fn ended(&self, id: usize) -> bool {
+		self.0.lock().unwrap()[id].load(Ordering::SeqCst)
+	}
+
+	async fn ends_within(&self, id: usize, limit: Duration) -> bool {
+		tokio::time::timeout(limit, async {
+			while !self.ended(id) {
+				tokio::time::sleep(Duration::from_millis(20)).await;
+			}
+		})
+		.await
+		.is_ok()
+	}
+}
+
+#[derive(Clone)]
+struct ScopedActors {
+	policy: EgressPolicy,
+	actors: Arc<Mutex<std::collections::HashMap<&'static str, EgressHandler>>>,
+}
+#[async_trait::async_trait]
+impl ateapimock::Handler for ScopedActors {
+	async fn get_actor_egress_policy(
+		&mut self,
+		_: &protos::ateapi::GetActorEgressPolicyRequest,
+	) -> Result<EgressPolicy, tonic::Status> {
+		Ok(self.policy.clone())
+	}
+	async fn get_actor(
+		&mut self,
+		request: &protos::ateapi::GetActorRequest,
+	) -> Result<Actor, tonic::Status> {
+		let name = request.actor.as_ref().unwrap().name.as_str();
+		let view = self.actors.lock().unwrap().get(name).cloned();
+		let view = view.ok_or_else(|| tonic::Status::not_found("actor"))?;
+		Ok(Actor {
+			metadata: Some(ResourceMetadata {
+				uid: view.uid.to_owned(),
+				..Default::default()
+			}),
+			status: Some(ActorStatus {
+				state: ActorState::Running as i32,
+				worker_assignment: None,
+				activation_id: view.activation_id.to_owned(),
+				quarantine: view
+					.quarantine
+					.then_some(protos::ateapi::ActorQuarantine {}),
+				holds: if view.held {
+					vec![protos::ateapi::ActorHold {}]
+				} else {
+					vec![]
+				},
+			}),
+		})
+	}
+}
+
+#[cfg(feature = "crypto-aws-lc")]
+struct InterceptedTunnel {
+	sender: hyper::client::conn::http2::SendRequest<Body>,
+	connection: tokio::task::JoinHandle<()>,
+}
+#[cfg(feature = "crypto-aws-lc")]
+impl InterceptedTunnel {
+	async fn open(gateway: &TestBind, port: u16, actor: &str, uid: &str, run: Option<&str>) -> Self {
+		let certificate = actor_certificate_for(
+			actor,
+			&format!("spiffe://substrate-actor.local/worker-for-actor/demo/{actor}"),
+			Some(uid),
+			run,
+		);
+		let io = open_actor_egress_tunnel_certificate(gateway, port, true, certificate).await;
+		let tls: agentgateway::http::backendtls::BackendTLS =
+			agentgateway::http::backendtls::ResolvedBackendTLS {
+				root: Some(include_bytes!("../../../../examples/mcp-tls/certs/ca-cert.pem").to_vec()),
+				alpn: Some(vec!["h2".to_owned()]),
+				..Default::default()
+			}
+			.try_into()
+			.unwrap();
+		let io = tokio_rustls::TlsConnector::from(tls.base_config().config)
+			.connect(
+				rustls_pki_types::ServerName::try_from("localhost").unwrap(),
+				io,
+			)
+			.await
+			.unwrap();
+		let (sender, connection) =
+			hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+				.handshake(TokioIo::new(io))
+				.await
+				.unwrap();
+		let connection = tokio::spawn(async move {
+			let _ = connection.await;
+		});
+		Self { sender, connection }
+	}
+
+	/// The origin connection that served one request, or None if it failed.
+	async fn request(&mut self) -> Option<usize> {
+		let request = ::http::Request::builder()
+			.uri("https://localhost/pooled")
+			.body(Body::empty())
+			.unwrap();
+		let response = self.sender.send_request(request).await.ok()?;
+		if response.status() != StatusCode::OK {
+			return None;
+		}
+		let id = response
+			.headers()
+			.get("x-origin-connection")?
+			.to_str()
+			.ok()?
+			.parse()
+			.ok()?;
+		response.into_body().collect().await.ok()?;
+		Some(id)
+	}
+
+	/// Three requests that must share one origin connection.
+	async fn pooled(&mut self) -> usize {
+		let id = self.request().await.expect("request through open tunnel");
+		for _ in 0..2 {
+			assert_eq!(self.request().await, Some(id), "requests were not pooled");
+		}
+		id
+	}
+
+	async fn close(self) {
+		drop(self.sender);
+		self.connection.abort();
+		let _ = self.connection.await;
+	}
+}
+
+// The origin, not the actor, decides whether an intercepted connection ended.
+// Each certificate-bound execution owns its upstream connections: they end
+// with its authorization or its last tunnel, and never serve another execution.
+#[cfg(feature = "crypto-aws-lc")]
+#[rstest::rstest]
+#[case::quarantine("quarantine")]
+#[case::activation("activation")]
+#[case::hold("hold")]
+#[case::last_tunnel("last-tunnel")]
+#[tokio::test]
+async fn substrate_upstream_connections_follow_the_execution(#[case] trigger: &str) {
+	let (_unused, certs) = tls_mock().await;
+	let (origin, address) = RecordingOrigin::spawn(&certs).await;
+	let port = address.port();
+	let policy = EgressPolicy {
+		rules: vec![protos::ateapi::EgressRule {
+			https: Some(protos::ateapi::HttpsRule {
+				hostnames: vec!["localhost".to_owned()],
+				ports: Some(protos::ateapi::Ports {
+					numbers: vec![i32::from(port)],
+					..Default::default()
+				}),
+				effects: None,
+			}),
+			..Default::default()
+		}],
+		..Default::default()
+	};
+	let actors = Arc::new(Mutex::new(std::collections::HashMap::from([
+		(
+			"my-actor",
+			EgressHandler {
+				uid: "uid-1",
+				activation_id: "run-1",
+				..Default::default()
+			},
+		),
+		(
+			"other-actor",
+			EgressHandler {
+				uid: "uid-2",
+				activation_id: "run-9",
+				..Default::default()
+			},
+		),
+	])));
+	let handler = ScopedActors {
+		policy,
+		actors: actors.clone(),
+	};
+	let api = ateapimock::AteApiMock::new(move || handler.clone())
+		.spawn()
+		.await;
+	let gateway = substrate_tls_gateway_with_api(
+		api.address,
+		address,
+		Some(certs.root_cert.pem().into_bytes()),
+	)
+	.await;
+
+	let mut bound = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", Some("run-1")).await;
+	let mut second =
+		InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", Some("run-1")).await;
+	let mut uid_only = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", None).await;
+	let mut other =
+		InterceptedTunnel::open(&gateway, port, "other-actor", "uid-2", Some("run-9")).await;
+	let bound_id = bound.pooled().await;
+	assert_eq!(
+		second.pooled().await,
+		bound_id,
+		"tunnels of one execution share its upstream connection"
+	);
+	let uid_only_id = uid_only.pooled().await;
+	let other_id = other.pooled().await;
+	assert_ne!(
+		bound_id, uid_only_id,
+		"bindings shared an upstream connection"
+	);
+	assert_ne!(bound_id, other_id, "actors shared an upstream connection");
+	assert_ne!(
+		uid_only_id, other_id,
+		"actors shared an upstream connection"
+	);
+	assert_eq!(origin.opened(), 3);
+
+	let budget = Duration::from_secs(8);
+	let start = std::time::Instant::now();
+	match trigger {
+		"quarantine" => {
+			actors
+				.lock()
+				.unwrap()
+				.get_mut("my-actor")
+				.unwrap()
+				.quarantine = true;
+			assert!(
+				origin.ends_within(bound_id, budget).await,
+				"bound upstream survived"
+			);
+			assert!(
+				origin.ends_within(uid_only_id, budget).await,
+				"UID-only upstream survived"
+			);
+			assert_eq!(bound.request().await, None);
+			assert_eq!(uid_only.request().await, None);
+		},
+		"activation" => {
+			actors
+				.lock()
+				.unwrap()
+				.get_mut("my-actor")
+				.unwrap()
+				.activation_id = "run-2";
+			assert!(
+				origin.ends_within(bound_id, budget).await,
+				"bound upstream survived"
+			);
+			assert_eq!(bound.request().await, None);
+			assert_eq!(second.request().await, None);
+			// A UID-only binding is not revoked by an activation change.
+			assert_eq!(uid_only.request().await, Some(uid_only_id));
+			assert!(!origin.ended(uid_only_id));
+		},
+		"hold" => {
+			actors.lock().unwrap().get_mut("my-actor").unwrap().held = true;
+			tokio::time::sleep(Duration::from_millis(7500)).await;
+			assert_eq!(bound.request().await, Some(bound_id));
+			assert_eq!(uid_only.request().await, Some(uid_only_id));
+		},
+		"last-tunnel" => {
+			bound.close().await;
+			tokio::time::sleep(Duration::from_millis(500)).await;
+			assert_eq!(
+				second.request().await,
+				Some(bound_id),
+				"upstream ended while the execution still had a tunnel"
+			);
+			second.close().await;
+			assert!(
+				origin.ends_within(bound_id, Duration::from_secs(3)).await,
+				"upstream outlived the execution's last tunnel"
+			);
+			assert_eq!(uid_only.request().await, Some(uid_only_id));
+			bound = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", Some("run-1")).await;
+			let reopened = bound.pooled().await;
+			assert_ne!(reopened, bound_id);
+			assert_eq!(origin.opened(), 4);
+		},
+		_ => unreachable!(),
+	}
+	println!(
+		"Q6 upstream scope trigger={trigger} elapsed_ms={}",
+		start.elapsed().as_millis()
+	);
+	// Another actor's upstream connection is never affected.
+	assert_eq!(other.request().await, Some(other_id));
+	assert!(!origin.ended(other_id));
+	assert_eq!(
+		origin.opened(),
+		if trigger == "last-tunnel" { 4 } else { 3 }
+	);
 }
