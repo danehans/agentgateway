@@ -17,8 +17,44 @@ const RPC_DEADLINE: Duration = Duration::from_secs(2);
 type Binding = (String, Option<String>);
 type Validate = dyn Fn(&Actor) -> Result<(), ProxyError> + Send + Sync;
 
+/// The upstream side of one certificate-bound execution on this replica.
+///
+/// It is part of the backend pool key, so pooled upstream connections are never
+/// shared between executions, and each one ends with the execution's
+/// authorization or its last tunnel. Only the registry creates a scope; request
+/// content cannot name or select one.
+#[derive(Clone, Debug)]
+pub struct ExecutionScope {
+	id: u64,
+	cancelled: CancellationToken,
+}
+impl ExecutionScope {
+	fn new(cancelled: CancellationToken) -> Self {
+		static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+		Self {
+			id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+			cancelled,
+		}
+	}
+	pub(crate) fn cancelled(&self) -> &CancellationToken {
+		&self.cancelled
+	}
+}
+impl PartialEq for ExecutionScope {
+	fn eq(&self, other: &Self) -> bool {
+		self.id == other.id
+	}
+}
+impl Eq for ExecutionScope {}
+impl std::hash::Hash for ExecutionScope {
+	fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+		self.id.hash(state);
+	}
+}
+
 pub(crate) struct Lease {
 	pub(crate) cancelled: CancellationToken,
+	pub(crate) scope: ExecutionScope,
 	pub(crate) reason: Mutex<&'static str>,
 	metrics: Option<Arc<crate::telemetry::metrics::Metrics>>,
 	// Polling stops when the last live binding releases its group.
@@ -97,8 +133,10 @@ impl Registry {
 		if let Some(metrics) = &metrics {
 			metrics.substrate_revocation_actors_active.inc();
 		}
+		let cancelled = CancellationToken::new();
 		let lease = Arc::new(Lease {
-			cancelled: CancellationToken::new(),
+			scope: ExecutionScope::new(cancelled.clone()),
+			cancelled,
 			reason: Mutex::new("actor-check-failed"),
 			metrics: metrics.clone(),
 			_group: group.clone(),
