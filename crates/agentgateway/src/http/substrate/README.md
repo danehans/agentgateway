@@ -3,6 +3,10 @@
 The egress policies use the protocol-based API from
 [Substrate PR #1751](https://github.com/agent-substrate/substrate/pull/1751).
 
+The minimal control API bindings use the actor state numbers from
+`kagent-dev/substrate` v1.0.1. Egress admission accepts only `RUNNING` and
+`RESUMING`; all other states, including unknown values, are refused.
+
 Configure `substrateEgressActorResolution` on the CONNECT frontend. Its control
 API backend handles both `GetActor` (before returning 200 to CONNECT) and
 `GetActorEgressPolicy` (when the inner TLS ClientHello arrives). Actor traffic is

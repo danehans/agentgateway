@@ -21,6 +21,15 @@ const UNREACHABLE_ADDR: &str = "127.0.0.1:1";
 
 #[test]
 fn substrate_control_api_wire_tags() {
+	assert_eq!(ActorState::Unspecified as i32, 0);
+	assert_eq!(ActorState::Resuming as i32, 1);
+	assert_eq!(ActorState::Running as i32, 2);
+	assert_eq!(ActorState::Suspending as i32, 3);
+	assert_eq!(ActorState::Suspended as i32, 4);
+	assert_eq!(ActorState::Crashed as i32, 5);
+	assert_eq!(ActorState::Deleting as i32, 6);
+	assert_eq!(ActorState::Reverting as i32, 7);
+
 	// Canonical Substrate tags: Actor.status=5 and MintActorJwtRequest fields=1,2,3.
 	let actor = <Actor as prost::Message>::decode(&b"\x2a\x04\x08\x02\x12\x00"[..]).unwrap();
 	let status = actor.status.unwrap();
@@ -1818,6 +1827,10 @@ async fn substrate_egress_connect_response_at_certificate(
 		}
 		(StatusCode::FORBIDDEN, String::from_utf8(response).unwrap())
 	} else if response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n") {
+		assert!(
+			upstream.accept().is_err(),
+			"unavailable CONNECT dialed upstream"
+		);
 		(
 			StatusCode::SERVICE_UNAVAILABLE,
 			String::from_utf8(response).unwrap(),
@@ -3959,13 +3972,50 @@ async fn substrate_egress_reports_an_unreachable_actor_service_as_unavailable() 
 }
 
 #[rstest::rstest]
+#[case::unavailable(tonic::Code::Unavailable, StatusCode::SERVICE_UNAVAILABLE)]
+#[case::deadline(tonic::Code::DeadlineExceeded, StatusCode::SERVICE_UNAVAILABLE)]
+#[case::not_found(tonic::Code::NotFound, StatusCode::FORBIDDEN)]
+#[case::unauthenticated(tonic::Code::Unauthenticated, StatusCode::FORBIDDEN)]
+#[case::permission_denied(tonic::Code::PermissionDenied, StatusCode::FORBIDDEN)]
+#[case::internal(tonic::Code::Internal, StatusCode::FORBIDDEN)]
+#[tokio::test]
+async fn substrate_egress_control_api_failures_refuse_before_dialing(
+	#[case] error: tonic::Code,
+	#[case] expected: StatusCode,
+) {
+	let api = ateapimock::AteApiMock::new(move || EgressHandler {
+		uid: "uid-1",
+		state: Some(ActorState::Running as i32),
+		activation_id: "run-1",
+		error: Some(error),
+		..Default::default()
+	})
+	.spawn()
+	.await;
+	let certificate = actor_certificate_with_identity(
+		"spiffe://substrate-actor.local/worker-for-actor/demo/my-actor",
+		Some("uid-1"),
+		Some("run-1"),
+	);
+	let (status, response) = substrate_egress_connect_response_at_certificate(
+		api.address,
+		certificate,
+		b"GET / HTTP/1.1\r\nHost: allowed.example\r\n\r\n",
+	)
+	.await;
+	assert_eq!(status, expected);
+	assert!(!response.contains("actor-uid-mismatch"));
+	assert!(!response.contains("activation-mismatch"));
+	assert!(!response.contains("actor-quarantined"));
+}
+
+#[rstest::rstest]
 #[case::unspecified(Some(ActorState::Unspecified as i32))]
 #[case::suspending(Some(ActorState::Suspending as i32))]
 #[case::suspended(Some(ActorState::Suspended as i32))]
-#[case::pausing(Some(ActorState::Pausing as i32))]
-#[case::paused(Some(ActorState::Paused as i32))]
 #[case::crashed(Some(ActorState::Crashed as i32))]
 #[case::deleting(Some(ActorState::Deleting as i32))]
+#[case::reverting(Some(ActorState::Reverting as i32))]
 #[case::unknown(Some(999))]
 #[case::missing_status(None)]
 #[tokio::test]
@@ -5081,6 +5131,11 @@ async fn substrate_upstream_connections_follow_the_execution(
 			// A UID-only binding is not revoked by an activation change.
 			assert_eq!(uid_only.request().await, Some(uid_only_id));
 			assert!(!origin.ended(uid_only_id));
+			bound = InterceptedTunnel::open(&gateway, port, "my-actor", "uid-1", Some("run-2")).await;
+			let resumed_id = bound.pooled().await;
+			assert_ne!(resumed_id, bound_id);
+			assert_ne!(resumed_id, uid_only_id);
+			assert_ne!(resumed_id, other_id);
 		},
 		"hold" => {
 			actors.lock().unwrap().get_mut("my-actor").unwrap().held = true;
@@ -5118,7 +5173,11 @@ async fn substrate_upstream_connections_follow_the_execution(
 	assert!(!origin.ended(other_id));
 	assert_eq!(
 		origin.opened(),
-		if trigger == "last-tunnel" { 4 } else { 3 }
+		if matches!(trigger, "last-tunnel" | "activation") {
+			4
+		} else {
+			3
+		}
 	);
 }
 
