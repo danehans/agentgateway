@@ -35,10 +35,9 @@ enum ActorState {
   ACTOR_STATE_RUNNING = 2;
   ACTOR_STATE_SUSPENDING = 3;
   ACTOR_STATE_SUSPENDED = 4;
-  ACTOR_STATE_PAUSING = 5;
-  ACTOR_STATE_PAUSED = 6;
-  ACTOR_STATE_CRASHED = 7;
-  ACTOR_STATE_DELETING = 8;
+  ACTOR_STATE_CRASHED = 5;
+  ACTOR_STATE_DELETING = 6;
+  ACTOR_STATE_REVERTING = 7;
 }
 
 // The minimal running-actor assignment required by AgentGateway ingress.
