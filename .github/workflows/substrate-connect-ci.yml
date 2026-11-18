@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - quarantine-connect-binding
+      - substrate-gateway-next
   pull_request:
     branches:
       - substrate-egress-policy-context
+      - substrate-gateway-next
 
 permissions:
   contents: read
